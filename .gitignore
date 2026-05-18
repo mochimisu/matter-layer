@@ -3,3 +3,7 @@ dist/
 .direnv/
 .env
 local/
+docs/
+examples/
+src/rooms/
+test/runtime.test.ts
