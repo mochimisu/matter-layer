@@ -8,10 +8,12 @@
   },
   "exports": {
     "./rules": "./src/api/rules.ts",
-    "./devices": "./src/api/devices.ts"
+    "./devices": "./src/api/devices.ts",
+    "./presets": "./src/devices/index.ts"
   },
   "scripts": {
     "dev": "tsx src/server.ts",
+    "dev:live": "scripts/dev-live.sh",
     "start": "tsx src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",

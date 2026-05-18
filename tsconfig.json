@@ -13,6 +13,7 @@
     "baseUrl": ".",
     "paths": {
       "matter-layer/devices": ["src/api/devices.ts"],
+      "matter-layer/presets": ["src/devices/index.ts"],
       "matter-layer/rules": ["src/api/rules.ts"]
     },
     "types": ["node", "vitest/globals"]

@@ -1,4 +1,5 @@
-import { poll, state } from "matter-layer/rules";
+import { poll } from "../runtime/dsl";
+import { state } from "../runtime/state";
 import { minute } from "./time";
 
 export const solarAngle = poll("solar.angle", minute, () =>
