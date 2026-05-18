@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "matter-layer/devices": ["src/api/devices.ts"],
+      "matter-layer/rules": ["src/api/rules.ts"]
+    },
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src", "test", "web", "vite.config.ts"]
+}
