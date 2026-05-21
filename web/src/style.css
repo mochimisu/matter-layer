@@ -41,13 +41,9 @@ button {
 
 @layer components {
   .gaia-app-header {
-    @apply relative border-b border-[#3a5e17] bg-[#b8cf19];
-    background:
-      radial-gradient(circle at 20% 110%, rgba(78, 115, 19, 0.30) 0 18%, transparent 18.5%),
-      radial-gradient(circle at 64% -12%, rgba(96, 132, 21, 0.34) 0 22%, transparent 22.5%),
-      radial-gradient(circle at 90% 84%, rgba(91, 126, 22, 0.30) 0 16%, transparent 16.5%),
-      linear-gradient(180deg, #dce96a 0%, #bfda20 48%, #a5c516 100%);
-    box-shadow: inset 0 -4px 0 #2d67d8;
+    @apply relative overflow-hidden border border-[rgba(58,92,32,0.22)];
+    background: linear-gradient(135deg, #b9d96a, #7fb33d 58%, #5e932e);
+    box-shadow: 0 0.55rem 1.25rem rgba(94,147,46,0.16);
   }
 
   .gaia-app-header::before {
@@ -56,43 +52,29 @@ button {
 
   .gaia-app-header::after {
     content: "";
-    @apply pointer-events-none absolute bottom-0 left-0 right-0 h-px bg-[#102f30];
+    @apply pointer-events-none absolute inset-0;
+    background: repeating-linear-gradient(90deg, transparent 0 2.5rem, rgba(255,255,255,0.08) 2.5rem 2.56rem);
   }
 
   .header-subtitle {
-    @apply text-[0.62rem] font-black uppercase text-white/75;
-    letter-spacing: 0.14em;
+    @apply text-[0.68rem] font-black uppercase text-white/70;
+    letter-spacing: 0.18em;
     margin-top: 0.08rem;
   }
 
   .header-title {
-    @apply m-0 text-[1.45rem] font-black leading-none text-white;
-    letter-spacing: -0.01em;
-    text-shadow: 0 1px 0 rgba(49, 74, 18, 0.42);
+    @apply m-0 leading-none text-white;
+    font-size: clamp(1.5rem, 3.5vw, 2.8rem);
+    font-weight: 620;
+    letter-spacing: -0.035em;
+    text-transform: uppercase;
   }
 
   .header-summary {
-    @apply relative z-10 grid min-w-[22rem] gap-1.5;
+    @apply relative z-10 grid min-w-[18rem] gap-1.5;
   }
 
-  .header-stats {
-    @apply overflow-hidden border border-white/35 text-gaia-ink shadow-[4px_4px_0_rgba(49,74,18,0.18)] backdrop-blur;
-    background: rgba(244,243,239,0.92);
-    clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
-  }
-
-  .header-stat {
-    @apply border-l border-[#cfd2cf] bg-[#f8f7f2] px-3 py-2 first:border-l-0;
-  }
-
-  .header-stat-label {
-    @apply text-[0.62rem] font-black uppercase text-gaia-muted;
-  }
-
-  .header-stat-value {
-    @apply text-xl font-black text-gaia-ink;
-  }
-
+  .header-matter-state,
   .room-filter {
     @apply flex items-center justify-between gap-3 border border-white/35 px-2 py-1 text-[0.65rem] font-black uppercase text-white shadow-[3px_3px_0_rgba(49,74,18,0.14)] backdrop-blur;
     background: rgba(48,55,42,0.72);
@@ -102,26 +84,18 @@ button {
     @apply min-w-40 rounded-none border border-white/35 bg-[#f4f3ef] px-2 py-1 text-left text-[0.7rem] font-black uppercase text-gaia-ink outline-none;
   }
 
-  .force-apply-button {
-    @apply min-h-7 border border-white/35 px-2 py-1 text-[0.65rem] font-black uppercase text-white shadow-[3px_3px_0_rgba(49,74,18,0.14)] transition disabled:cursor-not-allowed disabled:opacity-45;
-    background: rgba(37,41,44,0.78);
-  }
-
-  .force-apply-button:hover:not(:disabled) {
-    background: rgba(37,41,44,0.88);
-  }
-
   .header-tabs {
     @apply relative z-10 flex items-end gap-0 pl-0;
   }
 
   .header-tab {
-    @apply relative -mb-[4px] min-w-36 border border-[#d4d5d1] bg-[#e8e8e6] px-5 py-3 text-center text-sm font-black uppercase text-[#3f4648] transition;
-    box-shadow: 0 4px 10px rgba(37,41,44,0.12), inset 0 1px 0 rgba(255,255,255,0.80);
+    @apply relative -mb-[1px] min-w-36 border border-white/25 px-5 py-3 text-center text-sm font-black uppercase text-white/85 transition;
+    background: rgba(255,255,255,0.18);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.22);
   }
 
   .header-tab:hover {
-    @apply bg-[#f2f2ef];
+    @apply bg-white/25 text-white;
   }
 
   .header-tab-active {
@@ -204,44 +178,250 @@ button {
     @apply bg-white;
   }
 
-  .device-room-grid {
-    @apply grid gap-3 2xl:grid-cols-2;
+  .device-room {
+    @apply overflow-hidden border-0 bg-transparent shadow-none;
   }
 
-  .device-room {
-    @apply overflow-hidden;
+  .device-room::before {
+    display: none;
   }
 
   .device-table {
-    @apply overflow-x-auto bg-gaia-line;
+    @apply grid overflow-x-auto bg-transparent;
+    grid-template-columns: max-content max-content max-content minmax(7rem, 1fr) max-content max-content max-content;
+    column-gap: 0;
   }
 
   .device-table-row {
-    @apply grid min-w-[820px] grid-cols-[3.25rem_minmax(12rem,1.6fr)_7rem_minmax(10rem,1.2fr)_6rem_10rem] items-center gap-2 border-b border-gaia-line/80 bg-gaia-tile px-2.5 py-1.5 text-sm last:border-b-0;
+    @apply contents text-sm;
   }
 
-  .device-table-row:nth-child(odd) {
+  .device-table-row > span {
+    @apply min-w-0 border-b border-gaia-line/80 bg-gaia-tile px-2.5 py-1.5;
+  }
+
+  .device-table-row-striped > span {
     @apply bg-white/70;
   }
 
+  .device-table-row:last-child > span {
+    @apply border-b-0;
+  }
+
+  .device-room-head {
+    @apply col-span-full flex items-center gap-4 bg-transparent pb-3 pt-8;
+  }
+
+  .device-room-title {
+    @apply m-0 shrink-0 bg-transparent px-0 text-[1.45rem] font-black leading-[1.18];
+    color: #5f665d;
+  }
+
+  .device-room-title::after {
+    display: none;
+  }
+
+  .device-room-count {
+    @apply shrink-0 bg-transparent px-0 pt-1 text-right text-[0.78rem] font-black;
+    color: #7b8378;
+  }
+
+  .device-room-rule {
+    @apply h-px min-w-8 flex-1 bg-[#b8beb3];
+  }
+
+  .device-table-row > span:nth-child(1),
+  .device-table-row > span:nth-child(2),
+  .device-table-row > span:nth-child(3),
+  .device-table-row > span:nth-child(4) {
+    @apply text-left;
+  }
+
+  .device-table-row > span:nth-child(5),
+  .device-table-row > span:nth-child(6),
+  .device-table-row > span:nth-child(7) {
+    @apply text-right;
+  }
+
   .device-status {
-    @apply inline-flex min-w-7 justify-center text-base font-black leading-none;
+    @apply inline-flex min-w-7 items-center justify-center text-base font-black leading-none;
+  }
+
+  .light-status-icon {
+    @apply relative inline-flex h-7 w-7 items-center justify-center;
+  }
+
+  .light-status-icon svg {
+    @apply relative z-10;
+  }
+
+  .light-ray {
+    @apply absolute block h-0.5 w-1 rounded-full bg-current;
+    content: "";
+  }
+
+  .light-ray-left {
+    left: 0.15rem;
+    top: 0.42rem;
+    transform: rotate(35deg);
+  }
+
+  .light-ray-top {
+    left: 50%;
+    top: 0.04rem;
+    transform: translateX(-50%) rotate(90deg);
+  }
+
+  .light-ray-right {
+    right: 0.15rem;
+    top: 0.42rem;
+    transform: rotate(-35deg);
+  }
+
+  .light-ray-lower-left {
+    left: 0.06rem;
+    top: 0.88rem;
+  }
+
+  .light-ray-lower-right {
+    right: 0.06rem;
+    top: 0.88rem;
+  }
+
+  .blind-status-icon {
+    @apply h-6 w-6 fill-none stroke-current;
+    stroke-width: 2.15;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .presence-status-icon-clear {
+    stroke-dasharray: 1 5;
+    stroke-linecap: round;
+  }
+
+  .device-name-with-health {
+    @apply min-w-max;
   }
 
   .device-name-cell {
-    @apply min-w-0;
+    @apply min-w-max;
   }
 
   .device-name-trigger {
-    @apply block cursor-default truncate font-black outline-none;
+    @apply flex min-w-max cursor-default items-center gap-1.5 font-black outline-none;
+  }
+
+  .device-actions {
+    @apply flex min-w-0 flex-nowrap justify-end gap-1;
+  }
+
+  .device-actions .gaia-button {
+    @apply whitespace-nowrap;
+  }
+
+  .device-ops {
+    @apply flex min-w-max flex-nowrap items-center justify-end gap-1;
+  }
+
+  .device-ops .gaia-button {
+    @apply whitespace-nowrap;
+  }
+
+  .device-op-button {
+    @apply min-w-14 flex-col gap-0 leading-tight;
+  }
+
+  .device-op-result {
+    @apply max-w-16 truncate text-[0.58rem] font-black normal-case;
+  }
+
+  .device-op-result-ok {
+    @apply text-gaia-green;
+  }
+
+  .device-op-result-bad {
+    @apply text-gaia-red;
+  }
+
+  .device-action-pair {
+    @apply inline-flex min-w-max;
+  }
+
+  .device-action-pair .gaia-button {
+    clip-path: none;
+  }
+
+  .device-action-pair .gaia-button + .gaia-button {
+    @apply -ml-px;
+  }
+
+  .device-action-duration {
+    @apply px-1.5 normal-case text-gaia-muted;
   }
 
   .device-name-trigger:focus-visible {
     @apply text-gaia-green;
   }
 
+  .device-offline-dot {
+    @apply h-2 w-2 shrink-0 rounded-full bg-[#c94f3d];
+  }
+
   .device-name-tooltip {
     @apply fixed z-50 grid max-w-[19rem] gap-1 border border-gaia-line bg-gaia-paper px-3 py-2 text-xs text-gaia-muted shadow-[4px_4px_0_rgba(37,41,44,0.16)];
+  }
+
+  .device-name-tooltip-offline {
+    @apply font-black uppercase text-[#c94f3d];
+  }
+
+  .matter-log-table {
+    @apply max-h-[calc(100vh-220px)] overflow-auto bg-gaia-line;
+  }
+
+  .log-filter-bar {
+    @apply flex flex-wrap items-center gap-2 border-b border-gaia-line bg-gaia-paper px-3 py-2;
+  }
+
+  .log-filter {
+    @apply flex items-center gap-2 text-[0.65rem] font-black uppercase text-gaia-muted;
+  }
+
+  .log-filter select {
+    @apply min-w-56 rounded-none border border-gaia-line bg-white px-2 py-1 text-[0.7rem] font-black uppercase text-gaia-ink outline-none;
+  }
+
+  .matter-log-row {
+    @apply grid min-w-[760px] grid-cols-[9.5rem_6rem_minmax(18rem,1fr)_5rem] items-center gap-3 border-b border-gaia-line/80 bg-gaia-tile px-3 py-2 last:border-b-0;
+  }
+
+  .matter-log-row:nth-child(odd) {
+    @apply bg-white/70;
+  }
+
+  .matter-log-time {
+    @apply font-mono text-xs font-bold text-gaia-muted;
+  }
+
+  .matter-log-direction {
+    @apply inline-flex justify-center border border-gaia-line bg-white px-2 py-0.5 text-[0.65rem] font-black uppercase;
+  }
+
+  .matter-log-sent {
+    @apply border-gaia-orange text-gaia-orange;
+  }
+
+  .matter-log-received {
+    @apply border-gaia-green text-gaia-green;
+  }
+
+  .matter-log-status {
+    @apply text-right text-[0.65rem] font-black uppercase text-gaia-muted;
+  }
+
+  .matter-log-error {
+    @apply text-gaia-red;
   }
 
   .graph-column {

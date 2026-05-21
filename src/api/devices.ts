@@ -1,4 +1,5 @@
 export {
+  activeLayer,
   contact,
   cover,
   coverGroup,
@@ -6,6 +7,7 @@ export {
   light,
   matterDevice,
   remote,
+  rule,
   switchDevice,
 } from "../runtime/devices";
 export type { LightOptions, TargetDevice as Light } from "../runtime/devices";

@@ -12,7 +12,7 @@ import type {
 
 export class MatterProvider implements ProviderAdapter {
   readonly name = "matter" as const;
-  private runtime?: Runtime & { enqueueApply?: (target: string) => void };
+  private runtime?: Runtime & { enqueueApply?: (target: string) => void; notifyProviderChanged?: (provider: "matter") => void };
   private sources: SourceBinding[] = [];
   private targets = new Map<string, { target: string; capabilities: Record<string, any> }>();
   private ws?: WebSocket;
@@ -23,6 +23,8 @@ export class MatterProvider implements ProviderAdapter {
   private resolvedTargets = new Set<string>();
   private labelByNode = new Map<number, string>();
   private macByNode = new Map<number, string>();
+  private availableByNode = new Map<number, boolean>();
+  private offlineSinceByNode = new Map<number, number>();
   private sourceByNodePath = new Map<string, SourceBinding[]>();
   private nextMessageId = 0;
   private pending = new Map<
@@ -43,7 +45,14 @@ export class MatterProvider implements ProviderAdapter {
     },
   ) {}
 
-  start(runtime: Runtime & { sources?: Map<string, { binding: SourceBinding }>; targets?: Map<string, any>; enqueueApply?: (target: string) => void }) {
+  start(
+    runtime: Runtime & {
+      sources?: Map<string, { binding: SourceBinding }>;
+      targets?: Map<string, any>;
+      enqueueApply?: (target: string) => void;
+      notifyProviderChanged?: (provider: "matter") => void;
+    },
+  ) {
     this.runtime = runtime;
     if (runtime.sources) {
       this.sources = [...runtime.sources.values()].map((source) => source.binding);
@@ -103,6 +112,47 @@ export class MatterProvider implements ProviderAdapter {
     };
   }
 
+  async pingTarget(target: string) {
+    if (this.options.dryRun) {
+      return { ok: true, dryRun: true, target };
+    }
+    const nodeId = this.nodeIdForTarget(target);
+    const started = Date.now();
+    try {
+      const response = await this.send({ command: "ping_node", args: { node_id: nodeId } }, 15_000);
+      this.setNodeAvailability(nodeId, true);
+      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, result: (response as any).result };
+    } catch (error) {
+      this.setNodeAvailability(nodeId, false);
+      throw error;
+    }
+  }
+
+  async probeTarget(target: string) {
+    if (this.options.dryRun) {
+      return { ok: true, dryRun: true, target };
+    }
+    const nodeId = this.nodeIdForTarget(target);
+    const started = Date.now();
+    try {
+      const response = await this.send(
+        {
+          command: "read_attribute",
+          args: {
+            node_id: nodeId,
+            attribute_path: "0/40/5",
+          },
+        },
+        5_000,
+      );
+      this.setNodeAvailability(nodeId, true);
+      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, result: (response as any).result };
+    } catch (error) {
+      this.setNodeAvailability(nodeId, false);
+      throw error;
+    }
+  }
+
   snapshot() {
     return {
       enabled: this.options.enabled !== false,
@@ -115,6 +165,8 @@ export class MatterProvider implements ProviderAdapter {
         nodeId,
         label: this.labelByNode.get(nodeId),
         mac: this.macByNode.get(nodeId),
+        available: this.availableByNode.get(nodeId),
+        offlineSince: this.offlineSinceByNode.get(nodeId),
       })),
       unresolvedSources: this.sources
         .filter((source) => this.options.enabled !== false && source.provider === "matter" && !this.nodeByKey.has(source.key))
@@ -128,6 +180,7 @@ export class MatterProvider implements ProviderAdapter {
     this.ws = ws;
     ws.on("open", () => {
       this.connected = true;
+      this.runtime?.notifyProviderChanged?.(this.name);
       ws.send(JSON.stringify({ message_id: "matter-layer-start", command: "start_listening", args: {} }));
     });
     ws.on("message", (data) => {
@@ -166,6 +219,7 @@ export class MatterProvider implements ProviderAdapter {
     });
     ws.on("close", () => {
       this.connected = false;
+      this.runtime?.notifyProviderChanged?.(this.name);
       for (const [messageId, pending] of this.pending) {
         clearTimeout(pending.timeout);
         pending.reject(new Error(`Matter websocket closed before response to ${messageId}`));
@@ -177,16 +231,28 @@ export class MatterProvider implements ProviderAdapter {
 
   private ingestNodes(nodes: any[]) {
     this.nodeCount = Math.max(this.nodeCount, nodes.length);
+    let changed = false;
     for (const node of nodes) {
       const attrs = node.attributes ?? {};
       const nodeId = Number(node.node_id ?? node.nodeId ?? node.id);
       const label = attrs["0/40/5"] ?? node.name ?? node.label;
       const mac = macFromAttrs(attrs);
+      const hasAvailable = "available" in node;
+      const available = Boolean(node.available);
       if (Number.isFinite(nodeId) && typeof label === "string") {
         this.labelByNode.set(nodeId, label);
       }
       if (Number.isFinite(nodeId) && mac) {
         this.macByNode.set(nodeId, mac);
+      }
+      if (Number.isFinite(nodeId) && hasAvailable && this.availableByNode.get(nodeId) !== available) {
+        this.availableByNode.set(nodeId, available);
+        if (available) {
+          this.offlineSinceByNode.delete(nodeId);
+        } else {
+          this.offlineSinceByNode.set(nodeId, Date.now());
+        }
+        changed = true;
       }
       for (const binding of this.sources) {
         if (!binding.path || !this.matchesKey({ label, mac }, binding.key)) {
@@ -206,7 +272,7 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
       for (const target of this.targets.values()) {
-        if (this.matchesKey({ label, mac }, target.target) && Number.isFinite(nodeId)) {
+        if (this.matchesKey({ label, mac }, parentTarget(target.target)) && Number.isFinite(nodeId)) {
           this.nodeByKey.set(target.target, nodeId);
           if (!this.resolvedTargets.has(target.target)) {
             this.resolvedTargets.add(target.target);
@@ -214,6 +280,9 @@ export class MatterProvider implements ProviderAdapter {
           }
         }
       }
+    }
+    if (changed) {
+      this.runtime?.notifyProviderChanged?.(this.name);
     }
   }
 
@@ -362,12 +431,36 @@ export class MatterProvider implements ProviderAdapter {
         endpoint_id: spec.endpoint,
         cluster_id: spec.cluster,
         command_name: spec.command,
-        payload,
+        payload: {
+          ...(spec.payload ?? {}),
+          ...payload,
+        },
       },
     };
   }
 
-  private send(message: any) {
+  private nodeIdForTarget(target: string) {
+    const nodeId = this.nodeByKey.get(target) ?? this.nodeByKey.get(parentTarget(target));
+    if (!nodeId) {
+      throw new Error(`No Matter node resolved for ${target}`);
+    }
+    return nodeId;
+  }
+
+  private setNodeAvailability(nodeId: number, available: boolean) {
+    if (this.availableByNode.get(nodeId) === available) {
+      return;
+    }
+    this.availableByNode.set(nodeId, available);
+    if (available) {
+      this.offlineSinceByNode.delete(nodeId);
+    } else {
+      this.offlineSinceByNode.set(nodeId, Date.now());
+    }
+    this.runtime?.notifyProviderChanged?.(this.name);
+  }
+
+  private send(message: any, timeoutMs = 5000) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Matter websocket is not connected");
     }
@@ -382,7 +475,7 @@ export class MatterProvider implements ProviderAdapter {
       const timeout = setTimeout(() => {
         this.pending.delete(messageId);
         reject(new Error(`Matter websocket timed out waiting for ${messageId}`));
-      }, 5000);
+      }, timeoutMs);
       this.pending.set(messageId, { resolve, reject, timeout });
     });
   }
@@ -401,9 +494,25 @@ function normalizeLevel(value: unknown) {
 
 function normalizeColor(value: unknown) {
   if (value === "green") {
-    return { hue: 85, saturation: 254 };
+    return colorPayload(85);
+  }
+  if (value === "blue") {
+    return colorPayload(170);
+  }
+  if (value === "purple") {
+    return colorPayload(212);
   }
   return null;
+}
+
+function colorPayload(hue: number) {
+  return {
+    hue,
+    saturation: 254,
+    transitionTime: 0,
+    optionsMask: 0,
+    optionsOverride: 0,
+  };
 }
 
 function parentTarget(target: string) {

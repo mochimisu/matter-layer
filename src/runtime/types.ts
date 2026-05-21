@@ -42,6 +42,21 @@ export type CommandResult = {
   appliedAt: number;
 };
 
+export type MatterLogEntry = {
+  id: number;
+  at: number;
+  direction: "received" | "sent";
+  kind: "source" | "command";
+  subject: string;
+  key?: string;
+  property?: string;
+  value?: unknown;
+  state?: Record<string, unknown> | null;
+  reason?: string;
+  ok?: boolean;
+  error?: string;
+};
+
 export type SourceBinding = {
   source: SourceId;
   key: string;
@@ -107,6 +122,7 @@ export type RuntimeEvent =
   | { type: "signal.changed"; id: string; value: unknown }
   | { type: "rule.run"; name: string }
   | { type: "device.event"; event: string }
+  | { type: "provider.changed"; provider: ProviderName }
   | { type: "layer.changed"; target: string; layer: LayerName; output: LayerOutput | null }
   | { type: "command"; result: CommandResult };
 

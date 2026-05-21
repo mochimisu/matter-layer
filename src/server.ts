@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
@@ -15,19 +16,19 @@ async function main() {
   const config = loadConfig();
   const runtime = new MatterLayerRuntime({ dryRun: config.dryRun });
   runtime.loadModules(await loadRulesModule(config.rulesModule));
-  runtime.registerProvider(
-    new MatterProvider({
-      url: config.matterWsUrl,
-      dryRun: config.dryRun,
-      enabled: config.matterEnabled,
-      bindings: config.matterBindings,
-    }),
-  );
+  const matterProvider = new MatterProvider({
+    url: config.matterWsUrl,
+    dryRun: config.dryRun,
+    enabled: config.matterEnabled,
+    bindings: config.matterBindings,
+  });
+  runtime.registerProvider(matterProvider);
   await runtime.start();
 
   const app = express();
   app.use(cors());
   app.use(express.json());
+  const sourceOverrides = new Map<string, { previous: unknown; timeout?: NodeJS.Timeout }>();
 
   app.get("/api/status", (_req, res) => {
     res.json({
@@ -84,7 +85,36 @@ async function main() {
 
   app.delete("/api/devices/:target/web-override", (req, res) => {
     runtime.clearLayer(req.params.target, "webOverride");
+    runtime.clearLayer(req.params.target, "override");
     res.json(runtime.snapshot());
+  });
+
+  app.post("/api/devices/:target/matter-ping", async (req, res) => {
+    const target = req.params.target;
+    if (!runtime.targets.has(target)) {
+      res.status(404).json({ error: "unknown target" });
+      return;
+    }
+    try {
+      const result = await matterProvider.pingTarget(target);
+      res.json({ result, snapshot: runtime.snapshot() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/devices/:target/matter-probe", async (req, res) => {
+    const target = req.params.target;
+    if (!runtime.targets.has(target)) {
+      res.status(404).json({ error: "unknown target" });
+      return;
+    }
+    try {
+      const result = await matterProvider.probeTarget(target);
+      res.json({ result, snapshot: runtime.snapshot() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.post("/api/automations/:name", (req, res) => {
@@ -113,10 +143,32 @@ async function main() {
   });
 
   app.post("/api/test/source", (req, res) => {
-    const { source, value } = req.body ?? {};
+    const { source, value, ttl } = req.body ?? {};
     if (typeof source !== "string") {
       res.status(400).json({ error: "source is required" });
       return;
+    }
+    const binding = runtime.sources.get(source);
+    if (!binding) {
+      res.status(404).json({ error: "unknown source" });
+      return;
+    }
+    const previous = binding.peek();
+    const existing = sourceOverrides.get(source);
+    if (existing?.timeout) {
+      clearTimeout(existing.timeout);
+    }
+    const restoreValue = existing ? existing.previous : previous;
+    let duration: number | undefined;
+    if (typeof ttl === "string" && ttl.length > 0) {
+      const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(ttl.trim());
+      if (!match) {
+        res.status(400).json({ error: "invalid ttl" });
+        return;
+      }
+      const amount = Number(match[1]);
+      const unit = match[2];
+      duration = unit === "ms" ? amount : unit === "s" ? amount * 1000 : unit === "m" ? amount * 60_000 : amount * 3_600_000;
     }
     runtime.updateSource({
       source,
@@ -124,6 +176,43 @@ async function main() {
       provider: "fake",
       observedAt: Date.now(),
     });
+    const override: { previous: unknown; timeout?: NodeJS.Timeout } = { previous: restoreValue };
+    if (duration !== undefined) {
+      const timeout = setTimeout(() => {
+        sourceOverrides.delete(source);
+        runtime.updateSource({
+          source,
+          value: restoreValue,
+          provider: "fake",
+          observedAt: Date.now(),
+        });
+      }, duration);
+      override.timeout = timeout;
+    }
+    sourceOverrides.set(source, override);
+    res.json(runtime.snapshot());
+  });
+
+  app.delete("/api/test/source/:source/override", (req, res) => {
+    const source = req.params.source;
+    const binding = runtime.sources.get(source);
+    if (!binding) {
+      res.status(404).json({ error: "unknown source" });
+      return;
+    }
+    const existing = sourceOverrides.get(source);
+    if (existing?.timeout) {
+      clearTimeout(existing.timeout);
+    }
+    sourceOverrides.delete(source);
+    if (existing) {
+      runtime.updateSource({
+        source,
+        value: existing.previous,
+        provider: "fake",
+        observedAt: Date.now(),
+      });
+    }
     res.json(runtime.snapshot());
   });
 
@@ -145,14 +234,50 @@ async function main() {
     res.json(runtime.snapshot());
   });
 
-  app.use(express.static(join(rootDir, "dist/web")));
-  app.use((req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/api/") || req.path === "/events") {
+  if (process.env.MATTER_LAYER_WEB_DEV === "1") {
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      root: join(rootDir, "web"),
+      appType: "custom",
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+      },
+    });
+    app.use((req, res, next) => {
+      if (!req.path.startsWith("/api/") && req.path !== "/events") {
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Matter-Layer-Web-Dev", "1");
+      }
       next();
-      return;
-    }
-    res.sendFile(join(rootDir, "dist/web/index.html"));
-  });
+    });
+    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      if ((req.method !== "GET" && req.method !== "HEAD") || req.path.startsWith("/api/") || req.path === "/events") {
+        next();
+        return;
+      }
+      try {
+        const template = await readFile(join(rootDir, "web/index.html"), "utf8");
+        const html = await vite.transformIndexHtml(req.originalUrl, template);
+        res.status(200).type("html").send(html);
+      } catch (error) {
+        if (error instanceof Error) {
+          vite.ssrFixStacktrace(error);
+        }
+        next(error);
+      }
+    });
+  } else {
+    app.use(express.static(join(rootDir, "dist/web")));
+    app.use((req, res, next) => {
+      if (req.method !== "GET" || req.path.startsWith("/api/") || req.path === "/events") {
+        next();
+        return;
+      }
+      res.sendFile(join(rootDir, "dist/web/index.html"));
+    });
+  }
 
   const server = app.listen(config.port, () => {
     console.log(`matter-layer API listening on http://127.0.0.1:${config.port}`);
@@ -205,6 +330,7 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
               value: source.peek(),
               since: source.since(),
             },
+            log: event.update.provider === "matter" ? runtime.matterLog.at(-1) : undefined,
           }
         : { type: "event" };
     }
@@ -240,6 +366,10 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
           }
         : { type: "event" };
     }
+    case "provider.changed": {
+      const provider = runtime.snapshot().providers.find((item) => item.name === event.provider);
+      return provider ? { type: "provider", provider } : { type: "event" };
+    }
     case "layer.changed":
       return {
         type: "layer",
@@ -249,6 +379,7 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
       return {
         type: "command",
         command: event.result,
+        log: runtime.matterLog.at(-1),
       };
     case "device.event":
       return { type: "event" };

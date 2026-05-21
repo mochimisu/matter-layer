@@ -20,7 +20,9 @@ import type {
   DesiredCommand,
   LayerName,
   LayerOutput,
+  MatterLogEntry,
   ProviderAdapter,
+  ProviderName,
   Runtime,
   RuntimeEvent,
   SourceBinding,
@@ -39,9 +41,14 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   readonly layers = new LayerStore();
   readonly providers = new Map<string, ProviderAdapter>();
   readonly commandResults: CommandResult[] = [];
+  readonly matterLog: MatterLogEntry[] = [];
   readonly eventHandlers = new Map<string, Set<() => void>>();
+  readonly sourceHandlers = new Map<string, Set<(update: SourceUpdate) => void>>();
   readonly eventActions = new Map<string, { name: string; event: string; outputs: Set<string>; lastRunAt?: number }>();
+  private readonly applyingTargets = new Set<string>();
+  private readonly pendingCommands = new Map<string, DesiredCommand>();
   private readonly scheduled = new Map<string, NodeJS.Timeout>();
+  private nextMatterLogId = 0;
   private clock?: NodeJS.Timeout;
   private activeRule?: string;
 
@@ -63,11 +70,26 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.targets.set(binding.target, binding);
   }
 
+  registerInternalRule(name: string, run: () => void) {
+    if (!this.rules.has(name)) {
+      this.rules.set(name, createRuleRegistration(name, run));
+    }
+  }
+
   registerEventHandler(event: string, handler: () => void) {
     let handlers = this.eventHandlers.get(event);
     if (!handlers) {
       handlers = new Set();
       this.eventHandlers.set(event, handlers);
+    }
+    handlers.add(handler);
+  }
+
+  registerSourceHandler(source: string, handler: (update: SourceUpdate) => void) {
+    let handlers = this.sourceHandlers.get(source);
+    if (!handlers) {
+      handlers = new Set();
+      this.sourceHandlers.set(source, handlers);
     }
     handlers.add(handler);
   }
@@ -99,6 +121,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.layers.write(target, layer, output);
     if (before !== this.layerFingerprint(target)) {
       this.emit({ type: "layer.changed", target, layer, output });
+      this.updateActiveLayerSource(target);
     }
     if (output?.expiresAt) {
       this.scheduleAt(output.expiresAt, `layer.${target}.${layer}`);
@@ -110,6 +133,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.layers.clear(target, layer);
     if (before !== this.layerFingerprint(target)) {
       this.emit({ type: "layer.changed", target, layer, output: null });
+      this.updateActiveLayerSource(target);
     }
     this.enqueueApply(target);
   }
@@ -118,15 +142,45 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     return Boolean(this.layers.layer(target, layer));
   }
 
+  surfaceLayer(target: string) {
+    return this.layers.surface(target);
+  }
+
   enqueueApply(target: string) {
     const command = this.layers.desiredCommand(target);
     if (!command || !this.layers.shouldApply(command)) {
       return;
     }
-    void this.applyCommand(command);
+    this.queueCommand(command);
   }
 
   async applyCommand(command: DesiredCommand): Promise<CommandResult> {
+    return this.performApplyCommand(command);
+  }
+
+  private queueCommand(command: DesiredCommand) {
+    if (this.applyingTargets.has(command.target)) {
+      this.pendingCommands.set(command.target, command);
+      return;
+    }
+    void this.drainCommandQueue(command);
+  }
+
+  private async drainCommandQueue(command: DesiredCommand) {
+    this.applyingTargets.add(command.target);
+    let next: DesiredCommand | undefined = command;
+    try {
+      while (next) {
+        await this.performApplyCommand(next);
+        next = this.pendingCommands.get(command.target);
+        this.pendingCommands.delete(command.target);
+      }
+    } finally {
+      this.applyingTargets.delete(command.target);
+    }
+  }
+
+  private async performApplyCommand(command: DesiredCommand): Promise<CommandResult> {
     const provider = this.providers.get("matter");
     const result = provider?.apply
       ? await provider.apply(command)
@@ -138,6 +192,19 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
           appliedAt: Date.now(),
     };
     this.commandResults.push(result);
+    if (result.provider === "matter") {
+      this.recordMatterLog({
+        at: result.appliedAt,
+        direction: "sent",
+        kind: "command",
+        subject: command.target,
+        key: command.target,
+        state: command.state,
+        reason: command.reason,
+        ok: result.ok,
+        error: result.error,
+      });
+    }
     if (!result.ok) {
       this.layers.forgetDesired(command.target);
     }
@@ -173,7 +240,19 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     if (!source.update(update.value, update.observedAt)) {
       return;
     }
+    if (update.provider === "matter") {
+      this.recordMatterLog({
+        at: update.observedAt,
+        direction: "received",
+        kind: "source",
+        subject: update.source,
+        key: source.binding.key,
+        property: source.binding.property,
+        value: update.value,
+      });
+    }
     this.emit({ type: "source.changed", update });
+    this.dispatchSourceChange(update);
     this.evaluateAffectedSignals(update.source);
     this.runAffected(update.source);
   }
@@ -304,6 +383,20 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     return true;
   }
 
+  private dispatchSourceChange(update: SourceUpdate) {
+    const handlers = this.sourceHandlers.get(update.source);
+    if (!handlers) {
+      return;
+    }
+    for (const handler of handlers) {
+      handler(update);
+    }
+  }
+
+  notifyProviderChanged(provider: ProviderName) {
+    this.emit({ type: "provider.changed", provider });
+  }
+
   scheduleAt(at: number, reason: string) {
     const delay = Math.max(0, at - Date.now());
     const existing = this.scheduled.get(reason);
@@ -397,6 +490,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       })),
       layers: this.layers.snapshot(),
       commands: this.commandResults.slice(-50),
+      matterLog: this.matterLog.slice(-200),
       events: [...this.eventHandlers.keys()],
       eventActions: [...this.eventActions.values()].map((action) => ({
         name: action.name,
@@ -471,8 +565,36 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.events.emit("event", event);
   }
 
+  private recordMatterLog(entry: Omit<MatterLogEntry, "id">) {
+    this.matterLog.push({ id: ++this.nextMatterLogId, ...entry });
+    if (this.matterLog.length > 200) {
+      this.matterLog.splice(0, this.matterLog.length - 200);
+    }
+  }
+
   private layerFingerprint(target: string) {
     return JSON.stringify(this.layers.snapshot().find((layer) => layer.target === target) ?? null);
+  }
+
+  private updateActiveLayerSource(target: string) {
+    const source = this.sources.get(`${target}.activeLayer`);
+    if (!source) {
+      return;
+    }
+    const surfaced = this.layers.surface(target);
+    this.updateSource({
+      source: source.source,
+      value: surfaced
+        ? {
+            layer: surfaced.layer,
+            state: surfaced.output.state,
+            power: surfaced.output.state?.power,
+            reason: surfaced.output.reason,
+          }
+        : null,
+      provider: "synthetic",
+      observedAt: Date.now(),
+    });
   }
 
   private roomState(room: string) {

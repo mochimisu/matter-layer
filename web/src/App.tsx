@@ -1,27 +1,55 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { Blinds, DoorClosed, DoorOpen, UserRound, UserRoundCheck } from "lucide-react";
+import {
+  DoorClosed,
+  DoorOpen,
+  Lightbulb,
+  UserRound,
+  UserRoundCheck,
+} from "lucide-react";
 import { buildFlowLanes, layoutFlowLanes, type FlowNodeModel } from "./flowGraph";
 import { applySnapshotDelta, type LiveMessage, type Snapshot } from "./snapshotDeltas";
 import "./style.css";
 
-type AppTab = "devices" | "details" | "graph";
+type AppTab = "devices" | "details" | "graph" | "log";
+type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
 
 function tabFromLocation(): AppTab {
   const tab = new URLSearchParams(location.search).get("tab");
-  return tab === "graph" || tab === "details" ? tab : "devices";
+  return tab === "graph" || tab === "details" || tab === "log" ? tab : "devices";
 }
 
 function roomFromLocation() {
   return new URLSearchParams(location.search).get("room") ?? "all";
 }
 
+function formatDeviceOpResult(result: unknown): DeviceOpResult {
+  const data = result && typeof result === "object" ? result as Record<string, unknown> : {};
+  const elapsed = typeof data.elapsedMs === "number" ? `${Math.round(data.elapsedMs)}ms` : "ok";
+  return { label: elapsed, tone: data.ok === false ? "bad" : "ok", title: formatValue(data.result ?? result) };
+}
+
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logDeviceFromLocation() {
+  return new URLSearchParams(location.search).get("device") ?? "all";
+}
+
+function logAutomationFromLocation() {
+  return new URLSearchParams(location.search).get("automation") ?? "all";
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [deviceOpResults, setDeviceOpResults] = useState<Record<string, DeviceOpResult>>({});
   const [tab, setTab] = useState<AppTab>(() => tabFromLocation());
   const [roomFilter, setRoomFilter] = useState(() => roomFromLocation());
+  const [logDeviceFilter, setLogDeviceFilter] = useState(() => logDeviceFromLocation());
+  const [logAutomationFilter, setLogAutomationFilter] = useState(() => logAutomationFromLocation());
 
   async function load() {
     const response = await fetch("/api/snapshot");
@@ -73,6 +101,8 @@ function App() {
     function syncUrlState() {
       setTab(tabFromLocation());
       setRoomFilter(roomFromLocation());
+      setLogDeviceFilter(logDeviceFromLocation());
+      setLogAutomationFilter(logAutomationFromLocation());
     }
     window.addEventListener("popstate", syncUrlState);
     return () => window.removeEventListener("popstate", syncUrlState);
@@ -105,12 +135,36 @@ function App() {
     history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
 
+  function selectLogDevice(next: string) {
+    setLogDeviceFilter(next);
+    const url = new URL(location.href);
+    if (next === "all") {
+      url.searchParams.delete("device");
+    } else {
+      url.searchParams.set("device", next);
+    }
+    history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function selectLogAutomation(next: string) {
+    setLogAutomationFilter(next);
+    const url = new URL(location.href);
+    if (next === "all") {
+      url.searchParams.delete("automation");
+    } else {
+      url.searchParams.set("automation", next);
+    }
+    history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
   async function mutate(key: string, url: string, init: RequestInit) {
     setBusy(key);
     try {
       const response = await fetch(url, init);
       if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json();
       await load();
+      return payload;
     } finally {
       setBusy(null);
     }
@@ -124,8 +178,48 @@ function App() {
     });
   }
 
+  async function setSource(source: string, value: unknown, ttl?: string) {
+    await mutate(source, "/api/test/source", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source, value, ttl }),
+    });
+  }
+
+  async function clearSource(source: string) {
+    await mutate(source, `/api/test/source/${encodeURIComponent(source)}/override`, { method: "DELETE" });
+  }
+
+  async function dispatchDeviceEvent(event: string) {
+    await mutate(event, "/api/test/event", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event }),
+    });
+  }
+
   async function clearOverride(target: string) {
     await mutate(target, `/api/devices/${encodeURIComponent(target)}/web-override`, { method: "DELETE" });
+  }
+
+  async function pingDevice(target: string) {
+    try {
+      const payload = await mutate(`ping:${target}`, `/api/devices/${encodeURIComponent(target)}/matter-ping`, { method: "POST" });
+      setDeviceOpResults((current) => ({ ...current, [`ping:${target}`]: formatDeviceOpResult(payload?.result) }));
+    } catch (error) {
+      setDeviceOpResults((current) => ({ ...current, [`ping:${target}`]: { label: "failed", tone: "bad", title: errorText(error) } }));
+      throw error;
+    }
+  }
+
+  async function probeDevice(target: string) {
+    try {
+      const payload = await mutate(`probe:${target}`, `/api/devices/${encodeURIComponent(target)}/matter-probe`, { method: "POST" });
+      setDeviceOpResults((current) => ({ ...current, [`probe:${target}`]: formatDeviceOpResult(payload?.result) }));
+    } catch (error) {
+      setDeviceOpResults((current) => ({ ...current, [`probe:${target}`]: { label: "failed", tone: "bad", title: errorText(error) } }));
+      throw error;
+    }
   }
 
   async function setAutomation(name: string, enabled: boolean) {
@@ -140,29 +234,28 @@ function App() {
     await mutate(source, `/api/test/source/${encodeURIComponent(source)}/toggle`, { method: "POST" });
   }
 
-  async function forceApplyCurrent() {
-    setBusy("force-apply");
-    try {
-      const response = await fetch("/api/apply-current", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ room: roomFilter }),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = await response.json();
-      setSnapshot(payload.snapshot);
-    } finally {
-      setBusy(null);
-    }
-  }
-
   const roomOptions = useMemo(() => roomNames(snapshot), [snapshot]);
-  const visibleSnapshot = useMemo(() => filterSnapshot(snapshot, roomFilter), [snapshot, roomFilter]);
+  const roomSnapshot = useMemo(() => filterSnapshot(snapshot, roomFilter), [snapshot, roomFilter]);
+  const logDeviceOptions = useMemo(() => deviceFilterOptions(roomSnapshot), [roomSnapshot]);
+  const logAutomationOptions = useMemo(() => automationFilterOptions(roomSnapshot), [roomSnapshot]);
+  useEffect(() => {
+    if (logDeviceFilter !== "all" && !logDeviceOptions.some((option) => option.value === logDeviceFilter)) {
+      selectLogDevice("all");
+    }
+  }, [logDeviceFilter, logDeviceOptions]);
+  useEffect(() => {
+    if (logAutomationFilter !== "all" && !logAutomationOptions.some((option) => option.value === logAutomationFilter)) {
+      selectLogAutomation("all");
+    }
+  }, [logAutomationFilter, logAutomationOptions]);
+  const visibleSnapshot = roomSnapshot;
+  const logSnapshot = useMemo(() => filterSnapshotByLogFilters(roomSnapshot, logDeviceFilter, logAutomationFilter), [roomSnapshot, logDeviceFilter, logAutomationFilter]);
   const matter = snapshot?.providers.find((provider) => provider.name === "matter");
   const activeOverrides = visibleSnapshot?.layers.filter((layer) => layer.surfaced?.layer === "webOverride" || layer.surfaced?.layer === "override").length ?? 0;
   const disabledRules = visibleSnapshot?.rules.filter((rule) => !rule.enabled).length ?? 0;
   const drivenDevices = visibleSnapshot?.layers.filter((layer) => layer.surfaced).length ?? 0;
-  const visibleResolvedBindings = matter?.status?.resolved?.filter((binding) => roomFilter === "all" || roomOf(binding.key) === roomFilter) ?? [];
+  const visibleTargetKeys = new Set((visibleSnapshot?.targets ?? []).flatMap((target) => [target.key, target.target]));
+  const visibleResolvedBindings = matter?.status?.resolved?.filter((binding) => visibleTargetKeys.has(binding.key) || (roomFilter === "all" || roomOf(binding.key) === roomFilter)) ?? [];
   const visibleUnresolvedSources = matter?.status?.unresolvedSources?.filter((source) => roomFilter === "all" || roomOf(source) === roomFilter).length ?? 0;
   const visibleUnresolvedTargets = matter?.status?.unresolvedTargets?.filter((target) => roomFilter === "all" || roomOf(target) === roomFilter).length ?? 0;
 
@@ -182,6 +275,7 @@ function App() {
     { id: "devices" as const, label: "Devices", title: "Devices" },
     { id: "details" as const, label: "Details", title: "Details" },
     { id: "graph" as const, label: "Graph", title: "Graph" },
+    { id: "log" as const, label: "Log", title: "Matter Log" },
   ];
 
   return (
@@ -194,10 +288,9 @@ function App() {
               <div className="header-subtitle">Matter Control Plane</div>
             </div>
             <div className="header-summary">
-              <div className="header-stats grid grid-cols-3 text-right text-xs font-black uppercase">
-                <HeaderStat label="Sources" value={visibleSnapshot?.sources.length ?? 0} />
-                <HeaderStat label="Devices" value={visibleSnapshot?.targets.length ?? 0} />
-                <HeaderStat label="Rules" value={visibleSnapshot?.rules.length ?? 0} />
+              <div className="header-matter-state">
+                <span>Matter</span>
+                <StatusPill status={matter?.status} />
               </div>
               <label className="room-filter">
                 <span>Room</span>
@@ -210,9 +303,6 @@ function App() {
                   ))}
                 </select>
               </label>
-              <button className="force-apply-button" disabled={busy === "force-apply"} onClick={() => void forceApplyCurrent()}>
-                Force Apply Current
-              </button>
             </div>
           </div>
           <nav className="header-tabs">
@@ -236,7 +326,7 @@ function App() {
           <section className="gaia-panel">
             <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
               <h2 className="gaia-title">Provider</h2>
-              <StatusPill connected={matter?.status?.connected} enabled={matter?.status?.enabled} />
+              <StatusPill status={matter?.status} />
             </div>
             <div className="grid grid-cols-2 gap-px bg-gaia-line text-sm">
               <Stat label="Nodes" value={matter?.status?.nodeCount ?? 0} />
@@ -367,11 +457,25 @@ function App() {
             <DevicesOverview
               snapshot={visibleSnapshot}
               matter={matter}
-              activeOverrides={activeOverrides}
-              drivenDevices={drivenDevices}
               busy={busy}
               onSetOverride={setOverride}
+              onSetSource={setSource}
               onClearOverride={clearOverride}
+              onClearSource={clearSource}
+              onDispatchEvent={dispatchDeviceEvent}
+              onPingDevice={pingDevice}
+              onProbeDevice={probeDevice}
+              deviceOpResults={deviceOpResults}
+            />
+          ) : tab === "log" ? (
+            <LogView
+              snapshot={logSnapshot}
+              deviceFilter={logDeviceFilter}
+              automationFilter={logAutomationFilter}
+              deviceOptions={logDeviceOptions}
+              automationOptions={logAutomationOptions}
+              onSelectDevice={selectLogDevice}
+              onSelectAutomation={selectLogAutomation}
             />
           ) : (
             <GraphView snapshot={visibleSnapshot} />
@@ -711,84 +815,158 @@ function roomNames(snapshot: Snapshot | null) {
 function DevicesOverview({
   snapshot,
   matter,
-  activeOverrides,
-  drivenDevices,
   busy,
   onSetOverride,
+  onSetSource,
   onClearOverride,
+  onClearSource,
+  onDispatchEvent,
+  onPingDevice,
+  onProbeDevice,
+  deviceOpResults,
 }: {
   snapshot: Snapshot | null;
   matter: Snapshot["providers"][number] | undefined;
-  activeOverrides: number;
-  drivenDevices: number;
   busy: string | null;
   onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>;
+  onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>;
   onClearOverride: (target: string) => Promise<void>;
+  onClearSource: (source: string) => Promise<void>;
+  onDispatchEvent: (event: string) => Promise<void>;
+  onPingDevice: (target: string) => Promise<void>;
+  onProbeDevice: (target: string) => Promise<void>;
+  deviceOpResults: Record<string, DeviceOpResult>;
 }) {
   const layersByTarget = new Map((snapshot?.layers ?? []).map((layer) => [layer.target, layer]));
   const sourceById = new Map((snapshot?.sources ?? []).map((source) => [source.source, source]));
   const resolvedByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
   const rooms = groupTargetsByRoom(snapshot?.targets ?? []);
+  let deviceRowIndex = 0;
   return (
-    <>
-      <section className="grid gap-2 md:grid-cols-4">
-        <Metric label="Matter" value={matter?.status?.connected ? "Live" : matter?.status?.enabled === false ? "Disabled" : "Offline"} accent="cyan" />
-        <Metric label="Devices" value={visibleDeviceTargets(snapshot?.targets ?? []).length} accent="orange" />
-        <Metric label="Driven" value={drivenDevices} accent="green" />
-        <Metric label="Overrides" value={activeOverrides} accent="yellow" />
-      </section>
-
-      <div className="device-room-grid">
+    <section className="gaia-panel device-room">
+      <div className="device-table">
         {rooms.map(([room, targets]) => (
-          <section key={room} className="gaia-panel device-room">
-            <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
-              <h2 className="gaia-title">{humanRoomName(room)}</h2>
-              <span className="gaia-chip">{targets.length} devices</span>
+          <Fragment key={room}>
+            {(() => {
+              const availability = roomAvailability(targets, resolvedByKey);
+              return (
+            <div className="device-room-head">
+              <h2 className="device-room-title">{humanRoomName(room)}</h2>
+              <div className="device-room-rule" aria-hidden="true" />
+              <span className="device-room-count">{availability.available}/{availability.total}</span>
             </div>
-            <div className="device-table">
-              {targets.map((target) => {
-                const binding = resolvedByKey.get(target.key);
-                const layer = layersByTarget.get(target.target);
-                const status = deviceStatus(target, sourceById, layer);
-                const battery = deviceBattery(target, sourceById);
-                const metrics = deviceMetrics(target, sourceById);
-                const vendor = String(target.capabilities?.vendor ?? "");
-                const product = String(target.capabilities?.product ?? "");
-                const label = binding?.label || target.key;
-                const deviceInfo = [label, target.key, [vendor, product].filter(Boolean).join(" ")].filter(Boolean);
-                const reason = layer?.surfaced?.output.reason ?? (layer?.surfaced ? formatValue(layer.surfaced.output.state) : "");
-                return (
-                  <article key={target.target} className="device-table-row">
-                    <span>{status ? <DeviceStatusPill status={status} /> : null}</span>
-                    <DeviceName label={label} details={deviceInfo} />
-                    <span><LayerBadge layer={layer?.surfaced?.layer} /></span>
-                    <span className="min-w-0 truncate text-xs text-gaia-muted">{reason}</span>
-                    <span className="min-w-0 truncate text-xs text-gaia-muted">
-                      {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
-                    </span>
-                    <span className="flex flex-wrap gap-1">
-                      <button className="gaia-button" disabled={busy === target.target} onClick={() => void onSetOverride(target.target, { power: "on" }, "30m")}>
-                        On
-                      </button>
-                      <button className="gaia-button" disabled={busy === target.target} onClick={() => void onSetOverride(target.target, { power: "off" }, "30m")}>
-                        Off
-                      </button>
-                      <button className="gaia-button" disabled={busy === target.target} onClick={() => void onClearOverride(target.target)}>
-                        Clear
-                      </button>
-                    </span>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
+              );
+            })()}
+            {targets.map((target) => {
+              const binding = resolvedByKey.get(target.key) ?? resolvedByKey.get(target.target);
+              const layer = layersByTarget.get(target.target);
+              const status = deviceStatus(target, sourceById, layer);
+              const health = matterHealth(matter, binding);
+              const battery = deviceBattery(target, sourceById);
+              const metrics = deviceMetrics(target, sourceById);
+              const vendor = String(target.capabilities?.vendor ?? "");
+              const product = String(target.capabilities?.product ?? "");
+              const label = binding?.label || target.key;
+              const displayLabel = deviceDisplayLabel(label, target, room);
+              const deviceInfo = [label, target.key, [vendor, product].filter(Boolean).join(" ")].filter(Boolean);
+              const reason = layer?.surfaced?.output.reason ?? (layer?.surfaced ? formatValue(layer.surfaced.output.state) : "");
+              const actions = deviceActions(target, sourceById, onSetOverride, onSetSource, onClearOverride, onClearSource, onDispatchEvent);
+              const rowClass = deviceRowIndex++ % 2 === 0 ? "device-table-row device-table-row-striped" : "device-table-row";
+              return (
+                <article key={target.target} className={rowClass}>
+                  <span>{status ? <DeviceStatusPill status={status} /> : null}</span>
+                  <span className="device-name-with-health">
+                    <DeviceName label={displayLabel} details={deviceInfo} offline={health.tone === "bad"} offlineSince={health.offlineSince} />
+                  </span>
+                  <span><LayerBadge layer={layer?.surfaced?.layer} /></span>
+                  <span className="min-w-0 truncate text-xs text-gaia-muted">{reason}</span>
+                  <span className="min-w-0 truncate text-xs text-gaia-muted">
+                    {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
+                  </span>
+                  <span className="device-actions">
+                    {renderDeviceActions(actions, busy)}
+                  </span>
+                  <span className="device-ops">
+                    <button
+                      className="gaia-button device-op-button"
+                      disabled={busy === `ping:${target.target}`}
+                      title={deviceOpResults[`ping:${target.target}`]?.title}
+                      onClick={() => void onPingDevice(target.target)}
+                    >
+                      <span>Ping</span>
+                      {deviceOpResults[`ping:${target.target}`] ? (
+                        <span className={`device-op-result device-op-result-${deviceOpResults[`ping:${target.target}`].tone}`}>
+                          {deviceOpResults[`ping:${target.target}`].label}
+                        </span>
+                      ) : null}
+                    </button>
+                    <button
+                      className="gaia-button device-op-button"
+                      disabled={busy === `probe:${target.target}`}
+                      title={deviceOpResults[`probe:${target.target}`]?.title}
+                      onClick={() => void onProbeDevice(target.target)}
+                    >
+                      <span>Probe</span>
+                      {deviceOpResults[`probe:${target.target}`] ? (
+                        <span className={`device-op-result device-op-result-${deviceOpResults[`probe:${target.target}`].tone}`}>
+                          {deviceOpResults[`probe:${target.target}`].label}
+                        </span>
+                      ) : null}
+                    </button>
+                  </span>
+                </article>
+              );
+            })}
+          </Fragment>
         ))}
       </div>
-    </>
+    </section>
   );
 }
 
-function DeviceName({ label, details }: { label: string; details: string[] }) {
+function roomAvailability(targets: Snapshot["targets"], resolvedByKey: Map<string, MatterResolvedBinding>) {
+  let available = 0;
+  for (const target of targets) {
+    const binding = resolvedByKey.get(target.key) ?? resolvedByKey.get(target.target);
+    if (binding?.available === true) available += 1;
+  }
+  return { available, total: targets.length };
+}
+
+function renderDeviceActions(actions: DeviceAction[], busy: string | null) {
+  const rendered: ReactNode[] = [];
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index];
+    const durationAction = actions[index + 1];
+    if (durationAction?.label === `${action.label} 30m`) {
+      rendered.push(
+        <span key={action.label} className="device-action-pair">
+          <DeviceActionButton action={action} busy={busy} />
+          <DeviceActionButton action={durationAction} busy={busy} displayLabel="30m" className="device-action-duration" />
+        </span>,
+      );
+      index += 1;
+    } else {
+      rendered.push(<DeviceActionButton key={action.label} action={action} busy={busy} />);
+    }
+  }
+  return rendered;
+}
+
+function DeviceActionButton({ action, busy, displayLabel, className = "" }: { action: DeviceAction; busy: string | null; displayLabel?: string; className?: string }) {
+  return (
+    <button
+      className={className ? `gaia-button ${className}` : "gaia-button"}
+      disabled={busy === action.busyKey}
+      aria-label={displayLabel ? action.label : undefined}
+      onClick={() => void action.run()}
+    >
+      {displayLabel ?? action.label}
+    </button>
+  );
+}
+
+function DeviceName({ label, details, offline, offlineSince }: { label: string; details: string[]; offline?: boolean; offlineSince?: number }) {
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
 
   function showTooltip(element: HTMLElement) {
@@ -809,10 +987,12 @@ function DeviceName({ label, details }: { label: string; details: string[] }) {
         onFocus={(event) => showTooltip(event.currentTarget)}
         onBlur={() => setPosition(null)}
       >
-        {label}
+        <span className="min-w-0 truncate">{label}</span>
+        {offline ? <span className="device-offline-dot" aria-label="Offline" /> : null}
       </span>
       {position ? (
         <span className="device-name-tooltip" style={{ top: position.top, left: position.left }}>
+          {offline ? <span className="device-name-tooltip-offline">offline since {offlineSince ? formatRunTime(offlineSince) : "unknown"}</span> : null}
           {details.map((detail, index) => (
             <span key={`${detail}-${index}`} className={index === 0 ? "font-black text-gaia-ink" : ""}>
               {detail}
@@ -821,6 +1001,79 @@ function DeviceName({ label, details }: { label: string; details: string[] }) {
         </span>
       ) : null}
     </span>
+  );
+}
+
+function LogView({
+  snapshot,
+  deviceFilter,
+  automationFilter,
+  deviceOptions,
+  automationOptions,
+  onSelectDevice,
+  onSelectAutomation,
+}: {
+  snapshot: Snapshot | null;
+  deviceFilter: string;
+  automationFilter: string;
+  deviceOptions: Array<{ value: string; label: string }>;
+  automationOptions: Array<{ value: string; label: string }>;
+  onSelectDevice: (value: string) => void;
+  onSelectAutomation: (value: string) => void;
+}) {
+  const entries = [...(snapshot?.matterLog ?? [])].sort((left, right) => right.at - left.at || right.id - left.id);
+  return (
+    <section className="gaia-panel overflow-hidden">
+      <div className="gaia-panel-head border-l-4 border-l-gaia-purple">
+        <h2 className="gaia-title">Matter Log</h2>
+        <span className="gaia-chip">{entries.length} events</span>
+      </div>
+      <div className="log-filter-bar">
+        <label className="log-filter">
+          <span>Device</span>
+          <select value={deviceFilter} onChange={(event) => onSelectDevice(event.target.value)}>
+            <option value="all">All</option>
+            {deviceOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="log-filter">
+          <span>Automation</span>
+          <select value={automationFilter} onChange={(event) => onSelectAutomation(event.target.value)}>
+            <option value="all">All</option>
+            {automationOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="matter-log-table">
+        {entries.length ? entries.map((entry) => (
+          <article key={entry.id} className="matter-log-row">
+            <time className="matter-log-time" dateTime={new Date(entry.at).toISOString()}>
+              {formatTimestamp(entry.at)}
+            </time>
+            <span className={entry.direction === "sent" ? "matter-log-direction matter-log-sent" : "matter-log-direction matter-log-received"}>
+              {entry.direction}
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-black">{entry.subject}</span>
+              <span className="block truncate text-xs text-gaia-muted">{matterLogDetail(entry)}</span>
+            </span>
+            <span className={entry.ok === false ? "matter-log-status matter-log-error" : "matter-log-status"}>
+              {entry.ok === false ? "error" : entry.kind}
+            </span>
+          </article>
+        )) : (
+          <div className="gaia-row text-sm text-gaia-muted">No Matter events captured yet.</div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -837,6 +1090,166 @@ function groupTargetsByRoom(targets: Snapshot["targets"]) {
 
 function visibleDeviceTargets(targets: Snapshot["targets"]) {
   return targets.filter((target) => !target.target.includes(".endpoint.") && !target.target.endsWith(".statusLed"));
+}
+
+type DeviceAction = {
+  label: string;
+  busyKey: string;
+  run: () => Promise<void>;
+};
+
+function deviceActions(
+  target: Snapshot["targets"][number],
+  sourceById: Map<string, Snapshot["sources"][number]>,
+  onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>,
+  onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>,
+  onClearOverride: (target: string) => Promise<void>,
+  onClearSource: (source: string) => Promise<void>,
+  onDispatchEvent: (event: string) => Promise<void>,
+): DeviceAction[] {
+  if (target.capabilities?.buttons || target.capabilities?.events) {
+    return remoteActions(target, onDispatchEvent);
+  }
+  if (target.capabilities?.position || target.capabilities?.commands) {
+    return [
+      targetAction("Open", target, { position: "open" }, onSetOverride),
+      targetAction("Open 30m", target, { position: "open" }, onSetOverride, "30m"),
+      targetAction("Closed", target, { position: "closed" }, onSetOverride),
+      targetAction("Closed 30m", target, { position: "closed" }, onSetOverride, "30m"),
+      clearTargetAction(target, onClearOverride),
+    ];
+  }
+  const presence = sourceById.get(`${target.key}.presence`);
+  if (presence) {
+    return booleanSourceActions(presence.source, onSetSource, onClearSource);
+  }
+  const door = sourceById.get(`${target.key}.open`);
+  if (door) {
+    return booleanSourceActions(door.source, onSetSource, onClearSource);
+  }
+  if (target.capabilities?.power) {
+    return [
+      targetAction("On", target, { power: "on" }, onSetOverride),
+      targetAction("On 30m", target, { power: "on" }, onSetOverride, "30m"),
+      targetAction("Off", target, { power: "off" }, onSetOverride),
+      targetAction("Off 30m", target, { power: "off" }, onSetOverride, "30m"),
+      clearTargetAction(target, onClearOverride),
+    ];
+  }
+  return [];
+}
+
+function targetAction(
+  label: string,
+  target: Snapshot["targets"][number],
+  state: Record<string, unknown>,
+  onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>,
+  ttl?: string,
+): DeviceAction {
+  return {
+    label,
+    busyKey: target.target,
+    run: () => onSetOverride(target.target, state, ttl),
+  };
+}
+
+function clearTargetAction(target: Snapshot["targets"][number], onClearOverride: (target: string) => Promise<void>): DeviceAction {
+  return {
+    label: "Clear",
+    busyKey: target.target,
+    run: () => onClearOverride(target.target),
+  };
+}
+
+function booleanSourceActions(
+  source: string,
+  onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>,
+  onClearSource: (source: string) => Promise<void>,
+): DeviceAction[] {
+  return [
+    sourceAction("On", source, true, onSetSource),
+    sourceAction("On 30m", source, true, onSetSource, "30m"),
+    sourceAction("Off", source, false, onSetSource),
+    sourceAction("Off 30m", source, false, onSetSource, "30m"),
+    clearSourceAction(source, onClearSource),
+  ];
+}
+
+function sourceAction(
+  label: string,
+  source: string,
+  value: unknown,
+  onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>,
+  ttl?: string,
+): DeviceAction {
+  return {
+    label,
+    busyKey: source,
+    run: () => onSetSource(source, value, ttl),
+  };
+}
+
+function clearSourceAction(source: string, onClearSource: (source: string) => Promise<void>): DeviceAction {
+  return {
+    label: "Clear",
+    busyKey: source,
+    run: () => onClearSource(source),
+  };
+}
+
+function remoteActions(
+  target: Snapshot["targets"][number],
+  onDispatchEvent: (event: string) => Promise<void>,
+): DeviceAction[] {
+  const buttons = Object.keys((target.capabilities?.buttons as Record<string, unknown> | undefined) ?? {}).sort((left, right) => Number(left) - Number(right));
+  return buttons.slice(0, 2).map((button, index) => {
+    const event = `${target.key}.button.${button}.initialPress`;
+    return {
+      label: index === 0 ? "Top" : "Bottom",
+      busyKey: event,
+      run: () => onDispatchEvent(event),
+    };
+  });
+}
+
+function deviceDisplayLabel(label: string, target: Snapshot["targets"][number], room: string) {
+  return stripRoomPrefix(label, room) || stripRoomPrefix(target.key, room) || label;
+}
+
+function stripRoomPrefix(value: string, room: string) {
+  const prefixes = [...new Set([room, humanRoomName(room), room.replace(/([a-z])([A-Z])/g, "$1 $2"), room.replace(/[-_]+/g, " ")])]
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length);
+
+  for (const prefix of prefixes) {
+    const trimmed = stripPrefix(value, prefix);
+    if (trimmed !== value) return trimmed;
+  }
+  return value;
+}
+
+function stripPrefix(value: string, prefix: string) {
+  const leadingWhitespace = value.match(/^\s*/)?.[0].length ?? 0;
+  const candidate = value.slice(leadingWhitespace);
+  if (!candidate.toLowerCase().startsWith(prefix.toLowerCase())) return value;
+
+  const next = candidate[prefix.length];
+  const previous = candidate[prefix.length - 1];
+  const hasBoundary = next === undefined || /[\s._:-]/.test(next) || (/[a-z0-9]/.test(previous) && /[A-Z]/.test(next));
+  if (!hasBoundary) return value;
+
+  const stripped = candidate.slice(prefix.length).replace(/^[\s._:-]+/, "").trim();
+  return stripped || value;
+}
+
+type MatterResolvedBinding = NonNullable<NonNullable<Snapshot["providers"][number]["status"]>["resolved"]>[number];
+
+function matterHealth(matter: Snapshot["providers"][number] | undefined, binding: MatterResolvedBinding | undefined) {
+  if (matter?.status?.enabled === false) return { label: "disabled", tone: "muted" };
+  if (!binding) return { label: "unresolved", tone: "warn" };
+  if (binding.available === true) return { label: "online", tone: "ok" };
+  if (binding.available === false) return { label: "offline", tone: "bad", offlineSince: binding.offlineSince };
+  return { label: "unknown", tone: "muted" };
 }
 
 function humanRoomName(room: string) {
@@ -886,16 +1299,56 @@ function withStatusIcon(
   const isCover = Boolean(target.capabilities?.position || target.capabilities?.commands);
   if (isDoor && status.label === "open") return { ...status, icon: <DoorOpen size={22} strokeWidth={2.2} aria-hidden="true" /> };
   if (isDoor && status.label === "closed") return { ...status, icon: <DoorClosed size={22} strokeWidth={2.2} aria-hidden="true" /> };
-  if (isCover && status.label === "open") return { ...status, icon: "□" };
-  if (isCover && status.label === "closed") return { ...status, icon: "■" };
-  if (isCover && (status.label === "opening" || status.label === "closing" || status.label === "stopped")) {
-    return { ...status, icon: <Blinds size={22} strokeWidth={2.2} aria-hidden="true" /> };
-  }
-  if (isLight && status.label === "on") return { ...status, icon: "●" };
-  if (isLight && status.label === "off") return { ...status, icon: "○" };
-  if (isPresence && status.label === "active") return { ...status, icon: <UserRoundCheck size={22} strokeWidth={2.2} aria-hidden="true" /> };
-  if (isPresence && status.label === "clear") return { ...status, icon: <UserRound size={22} strokeWidth={2.2} aria-hidden="true" /> };
+  if (isCover && status.label === "open") return { ...status, icon: <BlindStatusIcon state="open" /> };
+  if (isCover && status.label === "closed") return { ...status, icon: <BlindStatusIcon state="closed" /> };
+  if (isCover && status.label === "opening") return { ...status, icon: <BlindStatusIcon state="opening" /> };
+  if (isCover && status.label === "closing") return { ...status, icon: <BlindStatusIcon state="closing" /> };
+  if (isCover && status.label === "stopped") return { ...status, icon: <BlindStatusIcon state="stopped" /> };
+  if (isLight && status.label === "on") return { ...status, icon: <LightStatusIcon on /> };
+  if (isLight && status.label === "off") return { ...status, icon: <LightStatusIcon /> };
+  if (isPresence && status.label === "active") return { ...status, icon: <PresenceStatusIcon active /> };
+  if (isPresence && status.label === "clear") return { ...status, icon: <PresenceStatusIcon /> };
   return status;
+}
+
+function LightStatusIcon({ on = false }: { on?: boolean }) {
+  return (
+    <span className={["light-status-icon", on ? "light-status-icon-on" : ""].filter(Boolean).join(" ")}>
+      <Lightbulb size={22} strokeWidth={2.2} aria-hidden="true" />
+      {on ? (
+        <>
+          <span className="light-ray light-ray-left" />
+          <span className="light-ray light-ray-top" />
+          <span className="light-ray light-ray-right" />
+          <span className="light-ray light-ray-lower-left" />
+          <span className="light-ray light-ray-lower-right" />
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+function BlindStatusIcon({ state }: { state: "open" | "closed" | "opening" | "closing" | "stopped" }) {
+  const covered = state === "closed" || state === "closing";
+  return (
+    <svg className="blind-status-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="16" height="16" rx="1.8" />
+      {covered ? (
+        <>
+          <path d="M4 8h16" />
+          <path d="M4 12h16" />
+          <path d="M4 16h16" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+function PresenceStatusIcon({ active = false }: { active?: boolean }) {
+  if (active) return <UserRoundCheck size={22} strokeWidth={2.2} aria-hidden="true" />;
+  return (
+    <UserRound className="presence-status-icon-clear" size={22} strokeWidth={2.2} aria-hidden="true" />
+  );
 }
 
 function statusFromLayer(target: Snapshot["targets"][number], state: Record<string, unknown> | undefined, observed: unknown) {
@@ -962,7 +1415,31 @@ function DeviceStatusPill({ status }: { status: { label: string; tone?: string; 
     warn: "text-gaia-orange",
     unknown: "text-gaia-muted",
   };
-  return <span className={`device-status ${classes[status.tone ?? "unknown"] ?? classes.unknown}`}>{status.icon ?? status.label}</span>;
+  return (
+    <span className={`device-status ${classes[status.tone ?? "unknown"] ?? classes.unknown}`} title={status.label} aria-label={status.label}>
+      {status.icon ?? status.label}
+    </span>
+  );
+}
+
+function deviceFilterOptions(snapshot: Snapshot | null) {
+  if (!snapshot) return [];
+  return visibleDeviceTargets(snapshot.targets)
+    .map((target) => ({
+      value: target.target,
+      label: target.key,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function automationFilterOptions(snapshot: Snapshot | null) {
+  if (!snapshot) return [];
+  return snapshot.rules
+    .map((rule) => ({
+      value: rule.name,
+      label: rule.name,
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
 }
 
 function filterSnapshot(snapshot: Snapshot | null, room: string): Snapshot | null {
@@ -975,6 +1452,7 @@ function filterSnapshot(snapshot: Snapshot | null, room: string): Snapshot | nul
   const layers = snapshot.layers.filter((layer) => inRoom(layer.target));
   const events = snapshot.events.filter(inRoom);
   const eventActions = (snapshot.eventActions ?? []).filter((action) => inRoom(action.name));
+  const matterLog = (snapshot.matterLog ?? []).filter((entry) => inRoom(entry.subject) || (entry.key ? inRoom(entry.key) : false) || (entry.reason ? inRoom(entry.reason) : false));
   return {
     ...snapshot,
     sources,
@@ -982,9 +1460,39 @@ function filterSnapshot(snapshot: Snapshot | null, room: string): Snapshot | nul
     targets,
     rules,
     layers,
+    matterLog,
     events,
     eventActions,
   };
+}
+
+function filterSnapshotByLogFilters(snapshot: Snapshot | null, deviceFilter: string, automationFilter: string): Snapshot | null {
+  if (!snapshot || (deviceFilter === "all" && automationFilter === "all")) return snapshot;
+  const target = deviceFilter === "all" ? undefined : snapshot.targets.find((item) => item.target === deviceFilter);
+  const deviceKey = target?.key ?? deviceFilter;
+  const matchesDevice = (id: string) =>
+    deviceFilter === "all" ||
+    id === deviceFilter ||
+    id === deviceKey ||
+    id.startsWith(`${deviceFilter}.`) ||
+    id.startsWith(`${deviceKey}.`);
+  const rule = automationFilter === "all" ? undefined : snapshot.rules.find((item) => item.name === automationFilter);
+  const deps = new Set(rule?.deps ?? []);
+  const outputs = new Set(rule?.outputs ?? []);
+  const matchesAutomation = (entry: NonNullable<Snapshot["matterLog"]>[number]) => {
+    if (automationFilter === "all") return true;
+    return (
+      entry.reason === automationFilter ||
+      deps.has(entry.subject) ||
+      outputs.has(entry.subject) ||
+      (entry.key ? deps.has(entry.key) || outputs.has(entry.key) : false)
+    );
+  };
+  const matterLog = (snapshot.matterLog ?? []).filter((entry) => {
+    const deviceMatches = deviceFilter === "all" || matchesDevice(entry.subject) || (entry.key ? matchesDevice(entry.key) : false);
+    return deviceMatches && matchesAutomation(entry);
+  });
+  return { ...snapshot, matterLog };
 }
 
 function FlowNode({
@@ -1038,19 +1546,21 @@ function timedOpacity(activeUntil: number | undefined, fadeUntil: number | undef
   return Math.max(0, 1 - (now - activeUntil) / (fadeUntil - activeUntil));
 }
 
-function StatusPill({ connected, enabled }: { connected?: boolean; enabled?: boolean }) {
-  const label = enabled === false ? "Disabled" : connected ? "Connected" : "Offline";
+function StatusPill({ status }: { status?: Snapshot["providers"][number]["status"] }) {
+  const enabled = status?.enabled;
+  const connected = status?.connected;
+  const counts = matterAvailabilityCounts(status);
+  const label = enabled === false ? "Disabled" : counts ? `${counts.available}/${counts.total}` : connected ? "Connected" : "Offline";
   const color = enabled === false ? "bg-gaia-yellow" : connected ? "bg-gaia-green" : "bg-gaia-red text-white";
   return <span className={`rounded-gaia border border-gaia-ink px-2 py-0.5 text-[0.68rem] font-black uppercase ${color}`}>{label}</span>;
 }
 
-function HeaderStat({ label, value }: { label: string; value: unknown }) {
-  return (
-    <div className="header-stat">
-      <div className="header-stat-label">{label}</div>
-      <div className="header-stat-value">{String(value)}</div>
-    </div>
-  );
+function matterAvailabilityCounts(status?: Snapshot["providers"][number]["status"]) {
+  if (!status || status.enabled === false) return null;
+  const total = status.nodeCount ?? status.resolved?.length ?? 0;
+  if (!total) return null;
+  const availableNodeIds = new Set((status.resolved ?? []).filter((binding) => binding.available === true).map((binding) => binding.nodeId));
+  return { available: availableNodeIds.size, total };
 }
 
 function Stat({ label, value, tone }: { label: string; value: unknown; tone?: "ok" | "warn" }) {
@@ -1115,6 +1625,24 @@ function formatRunTime(value?: number) {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
   return `${hours}h ago`;
+}
+
+function formatTimestamp(value: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+  }).format(value);
+}
+
+function matterLogDetail(entry: NonNullable<Snapshot["matterLog"]>[number]) {
+  if (entry.kind === "command") {
+    const parts = [entry.reason, entry.state ? formatValue(entry.state) : undefined, entry.error].filter(Boolean);
+    return parts.join(" · ") || "command";
+  }
+  const source = entry.property ? `${entry.key ?? entry.subject}.${entry.property}` : entry.key ?? entry.subject;
+  return `${source} = ${formatValue(entry.value)}`;
 }
 
 function formatValue(value: unknown) {

@@ -4,19 +4,27 @@ set -euo pipefail
 service_name="${MATTER_LAYER_SYSTEM_SERVICE:-matter-layer.service}"
 rules_module="${MATTER_LAYER_RULES_MODULE:-local/gaia/rules.ts}"
 bindings_file="${MATTER_LAYER_BINDINGS_FILE:-local/gaia/bindings.json}"
+lock_file="${MATTER_LAYER_DEV_LIVE_LOCK:-/run/lock/matter-layer-dev-live.lock}"
 
-service_was_active=0
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$service_name"; then
-  service_was_active=1
   sudo systemctl stop "$service_name"
 fi
 
-restore_service() {
-  if [ "$service_was_active" -eq 1 ]; then
-    sudo systemctl start "$service_name" || true
+if [ ! -e "$lock_file" ]; then
+  sudo install -m 0666 /dev/null "$lock_file"
+elif [ ! -w "$lock_file" ]; then
+  sudo chmod 0666 "$lock_file"
+fi
+
+exec 9<>"$lock_file"
+flock 9
+
+start_system_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl start --no-block "$service_name" || true
   fi
 }
-trap restore_service EXIT INT TERM
+trap start_system_service EXIT
 
 export MATTER_LAYER_RULES_MODULE="$rules_module"
 if [ -f "$bindings_file" ]; then
@@ -24,5 +32,7 @@ if [ -f "$bindings_file" ]; then
 fi
 export MATTER_LAYER_MATTER_ENABLED="${MATTER_LAYER_MATTER_ENABLED:-1}"
 export MATTER_LAYER_DRY_RUN="${MATTER_LAYER_DRY_RUN:-0}"
+export MATTER_LAYER_PORT="${MATTER_LAYER_PORT:-3010}"
+export MATTER_LAYER_WEB_DEV="${MATTER_LAYER_WEB_DEV:-1}"
 
-./node_modules/.bin/tsx src/server.ts
+./node_modules/.bin/tsx watch src/server.ts

@@ -6,6 +6,7 @@ import type {
   DeviceStatusDisplay,
   LayerName,
   LayerOutput,
+  SourceUpdate,
   TargetBinding,
   TargetId,
 } from "./types";
@@ -18,14 +19,25 @@ const deviceState = globalThis as typeof globalThis & {
 export type DeviceRuntime = {
   registerSource(source: SourceRef): void;
   registerTarget(binding: TargetBinding): void;
+  registerInternalRule(name: string, run: () => void): void;
   registerEventHandler(event: string, handler: () => void): void;
+  registerSourceHandler(source: string, handler: (update: SourceUpdate) => void): void;
   registerEventAction(action: { name: string; event: string; outputs: TargetId[] }): void;
   recordRuleOutput(target: TargetId): void;
   writeLayer(target: TargetId, layer: LayerName, output: LayerOutput | null): void;
   clearLayer(target: TargetId, layer: LayerName): void;
   hasLayer(target: TargetId, layer: LayerName): boolean;
+  surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput } | null;
+  updateSource(update: SourceUpdate): void;
   enqueueApply(target: TargetId): void;
 };
+
+export type ActiveLayerState = {
+  layer: LayerName;
+  state: Record<string, unknown> | null;
+  power?: unknown;
+  reason?: string;
+} | null;
 
 export function setDeviceRuntime(runtime: DeviceRuntime | null) {
   deviceState.__matterLayerDeviceRuntime = runtime;
@@ -186,6 +198,35 @@ export function eventAction(name: string, event: string, outputs: TargetId[]) {
   runtime().registerEventAction({ name, event, outputs });
 }
 
+export function activeLayer(target: TargetId) {
+  const activeRuntime = runtime();
+  const source = makeSource<ActiveLayerState>({
+    key: target,
+    property: "activeLayer",
+    provider: "synthetic",
+  });
+  activeRuntime.registerSource(source);
+  const surfaced = activeRuntime.surfaceLayer(target);
+  activeRuntime.updateSource({
+    source: source.source,
+    value: surfaced
+      ? {
+          layer: surfaced.layer,
+          state: surfaced.output.state,
+          power: surfaced.output.state?.power,
+          reason: surfaced.output.reason,
+        }
+      : null,
+    provider: "synthetic",
+    observedAt: Date.now(),
+  });
+  return source;
+}
+
+export function rule(name: string, run: () => void) {
+  runtime().registerInternalRule(name, run);
+}
+
 export class CoverDevice extends TargetDevice {
   open() {
     this.set({ position: "open" }, { layer: "automation" });
@@ -197,6 +238,10 @@ export class CoverDevice extends TargetDevice {
 
   stop() {
     this.set({ motion: "stop" }, { layer: "automation" });
+  }
+
+  onPositionChange(handler: (position: unknown, update: SourceUpdate) => void) {
+    runtime().registerSourceHandler(`${this.key}.position`, (update) => handler(update.value, update));
   }
 }
 
@@ -262,7 +307,7 @@ export function cover(key: string, options: Record<string, unknown> = {}) {
   }));
 }
 
-export function coverGroup(keysOrCovers: string[] | CoverDevice[], options: { member?: (key: string) => CoverDevice } = {}) {
+export function coverGroup(keysOrCovers: Array<string | CoverDevice>, options: { member?: (key: string) => CoverDevice } = {}) {
   const covers = keysOrCovers.map((item) =>
     typeof item === "string" ? (options.member ? options.member(item) : cover(item)) : item,
   );
