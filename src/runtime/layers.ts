@@ -11,6 +11,7 @@ export const layerPriority: Record<LayerName, number> = {
 
 export class LayerStore {
   private outputs = new Map<TargetId, Map<LayerName, LayerOutput>>();
+  private writtenAt = new Map<string, number>();
   private lastDesired = new Map<TargetId, string>();
 
   write(target: TargetId, layer: LayerName, output: LayerOutput | null) {
@@ -21,7 +22,12 @@ export class LayerStore {
     }
     if (!output || output.state === null) {
       targetLayers.delete(layer);
+      this.writtenAt.delete(layerKey(target, layer));
     } else {
+      const previous = targetLayers.get(layer);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(output)) {
+        this.writtenAt.set(layerKey(target, layer), Date.now());
+      }
       targetLayers.set(layer, output);
     }
   }
@@ -32,12 +38,13 @@ export class LayerStore {
 
   clear(target: TargetId, layer: LayerName) {
     this.outputs.get(target)?.delete(layer);
+    this.writtenAt.delete(layerKey(target, layer));
   }
 
   snapshot() {
     return [...this.outputs.entries()].map(([target, layers]) => ({
       target,
-      layers: [...layers.entries()].map(([layer, output]) => ({ layer, output })),
+      layers: [...layers.entries()].map(([layer, output]) => ({ layer, output, since: this.writtenAt.get(layerKey(target, layer)) })),
       surfaced: this.surface(target),
     }));
   }
@@ -48,14 +55,15 @@ export class LayerStore {
       return null;
     }
     const now = Date.now();
-    let best: { layer: LayerName; output: LayerOutput } | null = null;
+    let best: { layer: LayerName; output: LayerOutput; since?: number } | null = null;
     for (const [layer, output] of layers) {
       if (output.expiresAt && output.expiresAt <= now) {
         layers.delete(layer);
+        this.writtenAt.delete(layerKey(target, layer));
         continue;
       }
       if (!best || layerPriority[layer] > layerPriority[best.layer]) {
-        best = { layer, output };
+        best = { layer, output, since: this.writtenAt.get(layerKey(target, layer)) };
       }
     }
     return best;
@@ -70,6 +78,7 @@ export class LayerStore {
     for (const [layer, output] of layers) {
       if (output.expiresAt && output.expiresAt <= now) {
         layers.delete(layer);
+        this.writtenAt.delete(layerKey(target, layer));
         expired.push(layer);
       }
     }
@@ -101,4 +110,8 @@ export class LayerStore {
   forgetDesired(target: TargetId) {
     this.lastDesired.delete(target);
   }
+}
+
+function layerKey(target: TargetId, layer: LayerName) {
+  return `${target}:${layer}`;
 }

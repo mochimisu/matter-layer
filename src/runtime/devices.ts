@@ -28,7 +28,7 @@ export type DeviceRuntime = {
   writeLayer(target: TargetId, layer: LayerName, output: LayerOutput | null): void;
   clearLayer(target: TargetId, layer: LayerName): void;
   hasLayer(target: TargetId, layer: LayerName): boolean;
-  surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput } | null;
+  surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput; since?: number } | null;
   updateSource(update: SourceUpdate): void;
   enqueueApply(target: TargetId): void;
 };

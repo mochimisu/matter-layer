@@ -255,7 +255,15 @@ button {
   }
 
   .device-status {
-    @apply inline-flex min-w-7 items-center justify-center text-base font-black leading-none;
+    @apply inline-flex min-w-24 flex-col items-center justify-center gap-0.5 text-center text-base font-black leading-none;
+  }
+
+  .device-status-main {
+    @apply inline-flex min-h-7 items-center justify-center;
+  }
+
+  .device-status-duration {
+    @apply max-w-28 truncate text-[0.58rem] font-black normal-case leading-tight text-gaia-muted;
   }
 
   .light-status-icon {

@@ -41,8 +41,8 @@ export type Snapshot = {
   rules: Array<{ name: string; enabled: boolean; deps: string[]; outputs?: string[]; lastRunAt?: number; lastError?: string }>;
   layers: Array<{
     target: string;
-    layers: Array<{ layer: string; output: { state: unknown; reason?: string; expiresAt?: number } }>;
-    surfaced: { layer: string; output: { state: unknown; reason?: string } } | null;
+    layers: Array<{ layer: string; output: { state: unknown; reason?: string; expiresAt?: number }; since?: number }>;
+    surfaced: { layer: string; output: { state: unknown; reason?: string }; since?: number } | null;
   }>;
   commands?: Array<unknown>;
   matterLog?: Array<{

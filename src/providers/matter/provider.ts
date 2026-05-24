@@ -18,6 +18,7 @@ export class MatterProvider implements ProviderAdapter {
   private targets = new Map<string, { target: string; capabilities: Record<string, any> }>();
   private ws?: WebSocket;
   private connected = false;
+  private listenRefreshTimer?: NodeJS.Timeout;
   private nodeCount = 0;
   private lastMessageAt?: number;
   private nodeByKey = new Map<string, number>();
@@ -28,9 +29,12 @@ export class MatterProvider implements ProviderAdapter {
   private offlineSinceByNode = new Map<number, number>();
   private rssiByNode = new Map<number, number>();
   private lastProbeByTarget = new Map<string, number>();
+  private lastProbeByNode = new Map<number, number>();
   private probingTargets = new Set<string>();
   private staleProbeTimer?: NodeJS.Timeout;
+  private staleProbeRunning = false;
   private staleProbeStartedAt = Date.now();
+  private recentInitialPressByEndpoint = new Map<string, number>();
   private sourceByNodePath = new Map<string, SourceBinding[]>();
   private nextMessageId = 0;
   private pending = new Map<
@@ -130,11 +134,22 @@ export class MatterProvider implements ProviderAdapter {
       return { ok: true, dryRun: true, target };
     }
     const nodeId = this.nodeIdForTarget(target);
+    this.recordProbe(target);
     const started = Date.now();
     try {
       const response = await this.send({ command: "ping_node", args: { node_id: nodeId } }, 15_000);
-      this.setNodeAvailability(nodeId, true);
-      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, result: (response as any).result };
+      const result = (response as any).result;
+      const ok = pingResultIsReachable(result);
+      this.setNodeAvailability(nodeId, ok);
+      return {
+        ok,
+        dryRun: false,
+        target,
+        nodeId,
+        elapsedMs: Date.now() - started,
+        result,
+        ...(ok ? {} : { error: "Matter ping failed" }),
+      };
     } catch (error) {
       this.setNodeAvailability(nodeId, false);
       throw error;
@@ -234,6 +249,7 @@ export class MatterProvider implements ProviderAdapter {
       this.connected = true;
       this.runtime?.notifyProviderChanged?.(this.name);
       ws.send(JSON.stringify({ message_id: "matter-layer-start", command: "start_listening", args: {} }));
+      this.startListenRefreshLoop();
     });
     ws.on("message", (data) => {
       const message = JSON.parse(data.toString());
@@ -273,6 +289,10 @@ export class MatterProvider implements ProviderAdapter {
     });
     ws.on("close", () => {
       this.connected = false;
+      if (this.listenRefreshTimer) {
+        clearInterval(this.listenRefreshTimer);
+        this.listenRefreshTimer = undefined;
+      }
       this.runtime?.notifyProviderChanged?.(this.name);
       for (const [messageId, pending] of this.pending) {
         clearTimeout(pending.timeout);
@@ -281,6 +301,20 @@ export class MatterProvider implements ProviderAdapter {
       this.pending.clear();
       setTimeout(() => this.connect(), 1000);
     });
+  }
+
+  private startListenRefreshLoop() {
+    if (this.listenRefreshTimer) {
+      clearInterval(this.listenRefreshTimer);
+    }
+    const intervalSec = Number(process.env.MATTER_LISTEN_REFRESH_INTERVAL_SEC ?? "300");
+    if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+      return;
+    }
+    this.listenRefreshTimer = setInterval(() => {
+      void this.refreshNodes().catch(() => {});
+    }, Math.max(30, intervalSec) * 1000);
+    this.listenRefreshTimer.unref?.();
   }
 
   private ingestNodes(nodes: any[], options: { markSourcesUpdated?: boolean } = {}) {
@@ -389,7 +423,7 @@ export class MatterProvider implements ProviderAdapter {
       }
       const target = this.targets.get(key);
       const buttons = target?.capabilities?.buttons as Record<string, { endpoint: number }> | undefined;
-      if (buttons && (eventName === target?.capabilities?.events?.initialPress || eventId === 1 || eventId === 5 || eventId === 6)) {
+      if (buttons && this.shouldDispatchButtonPress(key, nodeId, endpoint, eventName, eventId, target?.capabilities?.events?.initialPress)) {
         const button = Object.entries(buttons).find(([, spec]) => spec.endpoint === endpoint)?.[0];
         if (button && clusterId === 59) {
           this.runtimeWithEvents().dispatchEvent?.(`${key}.button.${button}.initialPress`);
@@ -403,6 +437,32 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
     }
+  }
+
+  private shouldDispatchButtonPress(
+    key: string,
+    nodeId: number,
+    endpoint: number,
+    eventName: unknown,
+    eventId: number,
+    configuredInitialPress: unknown,
+  ) {
+    const eventKey = `${key}:${nodeId}:${endpoint}`;
+    const now = Date.now();
+    const isInitialPress = eventName === configuredInitialPress || eventId === 1;
+    if (isInitialPress) {
+      this.recentInitialPressByEndpoint.set(eventKey, now);
+      return true;
+    }
+    const isFallbackPress = eventId === 5 || eventId === 6;
+    if (!isFallbackPress) {
+      return false;
+    }
+    const lastInitial = this.recentInitialPressByEndpoint.get(eventKey);
+    if (lastInitial !== undefined && now - lastInitial < 4000) {
+      return false;
+    }
+    return true;
   }
 
   private emit(binding: SourceBinding, raw: unknown, options: { markUpdated?: boolean } = {}) {
@@ -449,7 +509,7 @@ export class MatterProvider implements ProviderAdapter {
     if (!enabled || this.staleProbeTimer) {
       return;
     }
-    const intervalMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_INTERVAL_SEC ?? "5") * 1000);
+    const intervalMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_INTERVAL_SEC ?? "60") * 1000);
     this.staleProbeTimer = setInterval(() => {
       void this.probeStaleTargets();
     }, intervalMs);
@@ -460,13 +520,30 @@ export class MatterProvider implements ProviderAdapter {
     if (this.options.dryRun || !this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (this.staleProbeRunning) {
+      return;
+    }
+    this.staleProbeRunning = true;
+    try {
+      await this.probeStaleTargetsOnce();
+    } finally {
+      this.staleProbeRunning = false;
+    }
+  }
+
+  private async probeStaleTargetsOnce() {
     const availableStaleAfterMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_AFTER_SEC ?? "120") * 1000);
     const unavailableStaleAfterMs = Math.max(
       availableStaleAfterMs,
       Number(process.env.MATTER_STALE_PROBE_UNAVAILABLE_AFTER_SEC ?? "300") * 1000,
     );
+    const maxPerPass = Math.max(1, Number(process.env.MATTER_STALE_PROBE_MAX_PER_PASS ?? "1"));
     const now = Date.now();
+    let pinged = 0;
     for (const target of this.targets.keys()) {
+      if (pinged >= maxPerPass) {
+        break;
+      }
       const nodeId = this.nodeByKey.get(target) ?? this.nodeByKey.get(parentTarget(target));
       if (!nodeId || this.probingTargets.has(target)) {
         continue;
@@ -478,17 +555,24 @@ export class MatterProvider implements ProviderAdapter {
       }
       const lastUpdateAt = sourceStats.lastUpdateAt;
       const lastProbeAt = this.lastProbeByTarget.get(target);
+      const lastNodeProbeAt = this.lastProbeByNode.get(nodeId);
       if ((lastUpdateAt ?? this.staleProbeStartedAt) > now - staleAfterMs) {
         continue;
       }
       if (lastProbeAt !== undefined && now - lastProbeAt < staleAfterMs) {
         continue;
       }
+      if (lastNodeProbeAt !== undefined && now - lastNodeProbeAt < staleAfterMs) {
+        continue;
+      }
       this.probingTargets.add(target);
+      this.lastProbeByNode.set(nodeId, now);
       try {
-        await this.probeTarget(target);
+        await this.pingTarget(target);
+        pinged += 1;
       } catch {
-        // Stale probes are opportunistic; availability is updated by probeTarget.
+        // Stale pings are opportunistic; availability is updated by pingTarget.
+        pinged += 1;
       } finally {
         this.probingTargets.delete(target);
       }
@@ -695,6 +779,19 @@ function normalizeColor(value: unknown) {
     return colorPayload(212);
   }
   return null;
+}
+
+function pingResultIsReachable(result: unknown) {
+  if (typeof result === "boolean") {
+    return result;
+  }
+  if (Array.isArray(result)) {
+    return result.some((value) => value === true);
+  }
+  if (result && typeof result === "object") {
+    return Object.values(result).some((value) => value === true);
+  }
+  return Boolean(result);
 }
 
 function colorPayload(hue: number) {

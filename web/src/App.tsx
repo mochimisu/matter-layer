@@ -15,6 +15,7 @@ import "./style.css";
 
 type AppTab = "devices" | "details" | "graph" | "log";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
+type DeviceStatus = { label: string; tone?: string; icon?: ReactNode; since?: number };
 
 function tabFromLocation(): AppTab {
   const tab = new URLSearchParams(location.search).get("tab");
@@ -27,8 +28,9 @@ function roomFromLocation() {
 
 function formatDeviceOpResult(result: unknown): DeviceOpResult {
   const data = result && typeof result === "object" ? result as Record<string, unknown> : {};
+  const failed = data.ok === false;
   const elapsed = typeof data.elapsedMs === "number" ? `${Math.round(data.elapsedMs)}ms` : "ok";
-  return { label: elapsed, tone: data.ok === false ? "bad" : "ok", title: formatValue(data.result ?? result) };
+  return { label: failed ? "failed" : elapsed, tone: failed ? "bad" : "ok", title: formatValue(data.result ?? result) };
 }
 
 function errorText(error: unknown) {
@@ -52,6 +54,7 @@ function App() {
   const [logDeviceFilter, setLogDeviceFilter] = useState(() => logDeviceFromLocation());
   const [logAutomationFilter, setLogAutomationFilter] = useState(() => logAutomationFromLocation());
   const [now, setNow] = useState(() => Date.now());
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
 
   async function load() {
     const response = await fetch("/api/snapshot");
@@ -61,43 +64,53 @@ function App() {
   useEffect(() => {
     let active = true;
     let lastSeq = 0;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
     async function loadIfActive() {
       const response = await fetch("/api/snapshot");
       const next = await response.json();
       if (active) setSnapshot(next);
     }
-    void loadIfActive();
-    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events`);
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data) as LiveMessage;
-        if (message.seq && lastSeq && message.seq !== lastSeq + 1) {
-          lastSeq = message.seq;
+    function connect() {
+      if (!active || !pageVisible) return;
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events`);
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data) as LiveMessage;
+          if (message.seq && lastSeq && message.seq !== lastSeq + 1) {
+            lastSeq = message.seq;
+            void loadIfActive();
+            return;
+          }
+          if (message.seq) lastSeq = message.seq;
+          if (message.type === "snapshot") {
+            if (active) setSnapshot(message.snapshot);
+            return;
+          }
+          if (message.type === "delta") {
+            setSnapshot((current) => (current ? applySnapshotDelta(current, message.delta) : current));
+            return;
+          }
           void loadIfActive();
-          return;
+        } catch {
+          void loadIfActive();
         }
-        if (message.seq) lastSeq = message.seq;
-        if (message.type === "snapshot") {
-          if (active) setSnapshot(message.snapshot);
-          return;
-        }
-        if (message.type === "delta") {
-          setSnapshot((current) => (current ? applySnapshotDelta(current, message.delta) : current));
-          return;
-        }
+      };
+      ws.onclose = () => {
+        ws = null;
+        if (!active || !pageVisible) return;
         void loadIfActive();
-      } catch {
-        void loadIfActive();
-      }
-    };
-    ws.onclose = () => {
-      if (active) void loadIfActive();
-    };
+        reconnectTimer = window.setTimeout(connect, 1000);
+      };
+    }
+    void loadIfActive();
+    connect();
     return () => {
       active = false;
-      ws.close();
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      ws?.close();
     };
-  }, []);
+  }, [pageVisible]);
 
   useEffect(() => {
     function syncUrlState() {
@@ -116,8 +129,17 @@ function App() {
   }, [tab]);
 
   useEffect(() => {
+    if (!pageVisible) return undefined;
     const timer = window.setInterval(() => setNow(Date.now()), 15_000);
     return () => window.clearInterval(timer);
+  }, [pageVisible]);
+
+  useEffect(() => {
+    function syncVisibility() {
+      setPageVisible(document.visibilityState !== "hidden");
+    }
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => document.removeEventListener("visibilitychange", syncVisibility);
   }, []);
 
   function selectTab(next: AppTab) {
@@ -477,6 +499,7 @@ function App() {
             <DevicesOverview
               snapshot={visibleSnapshot}
               matter={matter}
+              now={now}
               busy={busy}
               onSetOverride={setOverride}
               onSetSource={setSource}
@@ -498,7 +521,7 @@ function App() {
               onSelectAutomation={selectLogAutomation}
             />
           ) : (
-            <GraphView snapshot={visibleSnapshot} />
+            <GraphView snapshot={visibleSnapshot} pageVisible={pageVisible} />
           )}
         </div>
       </div>
@@ -506,7 +529,7 @@ function App() {
   );
 }
 
-function GraphView({ snapshot }: { snapshot: Snapshot | null }) {
+function GraphView({ snapshot, pageVisible }: { snapshot: Snapshot | null; pageVisible: boolean }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -521,9 +544,10 @@ function GraphView({ snapshot }: { snapshot: Snapshot | null }) {
   const [nodeChanges, setNodeChanges] = useState<Record<string, { value: boolean; activeUntil: number; fadeUntil: number }>>({});
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(() => new Set());
   useEffect(() => {
+    if (!pageVisible) return undefined;
     const interval = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(interval);
-  }, []);
+  }, [pageVisible]);
   const sources = snapshot?.sources ?? [];
   const signals = snapshot?.signals ?? [];
   const eventActions = snapshot?.eventActions ?? [];
@@ -835,6 +859,7 @@ function roomNames(snapshot: Snapshot | null) {
 function DevicesOverview({
   snapshot,
   matter,
+  now,
   busy,
   onSetOverride,
   onSetSource,
@@ -847,6 +872,7 @@ function DevicesOverview({
 }: {
   snapshot: Snapshot | null;
   matter: Snapshot["providers"][number] | undefined;
+  now: number;
   busy: string | null;
   onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>;
   onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>;
@@ -897,7 +923,7 @@ function DevicesOverview({
               const rowClass = deviceRowIndex++ % 2 === 0 ? "device-table-row device-table-row-striped" : "device-table-row";
               return (
                 <article key={target.target} className={rowClass}>
-                  <span>{status ? <DeviceStatusPill status={status} /> : null}</span>
+                  <span>{status ? <DeviceStatusPill status={status} now={now} /> : null}</span>
                   <span className="device-name-with-health">
                     <DeviceName label={displayLabel} details={deviceInfo} offline={health.tone === "bad"} offlineSince={health.offlineSince} />
                   </span>
@@ -1303,46 +1329,47 @@ function deviceStatus(
   const raw = source?.value ?? display?.value;
   const layeredState = layer?.surfaced?.output.state;
   const layered = layeredState && typeof layeredState === "object" ? layeredState as Record<string, unknown> : undefined;
-  const layeredStatus = statusFromLayer(target, layered, raw);
+  const layeredStatus = statusFromLayer(target, layer?.surfaced, layered, raw, source);
   if (layeredStatus) return layeredStatus;
   if (target.capabilities?.buttons || target.capabilities?.events) return null;
   if (!display && !source) return null;
   const mapped = display?.values?.[String(raw)];
-  if (typeof mapped === "string") return { label: mapped, tone: "unknown" };
+  if (typeof mapped === "string") return { label: mapped, tone: "unknown", since: source?.since ?? display?.since };
   if (mapped) return withStatusIcon(target, { label: mapped.label, tone: mapped.tone ?? "unknown" }, source);
   if (raw === undefined) return null;
   if (source?.property === "presence") return withStatusIcon(target, raw ? { label: "active", tone: "active" } : { label: "clear", tone: "idle" }, source);
   if (source?.property === "open") return withStatusIcon(target, raw ? { label: "open", tone: "open" } : { label: "closed", tone: "closed" }, source);
   if (typeof raw === "boolean") return withStatusIcon(target, raw ? { label: "on", tone: "on" } : { label: "off", tone: "off" }, source);
   if (typeof raw === "number" && target.capabilities?.position) {
-    if (raw <= 5) return withStatusIcon(target, { label: "open", tone: "open" });
-    if (raw >= 95) return withStatusIcon(target, { label: "closed", tone: "closed" });
-    return { label: `${Math.round(raw)}%`, tone: "active" };
+    if (raw <= 5) return withStatusIcon(target, { label: "open", tone: "open", since: source?.since ?? display?.since });
+    if (raw >= 95) return withStatusIcon(target, { label: "closed", tone: "closed", since: source?.since ?? display?.since });
+    return { label: `${Math.round(raw)}%`, tone: "active", since: source?.since ?? display?.since };
   }
-  return { label: formatValue(raw), tone: "unknown" };
+  return { label: formatValue(raw), tone: "unknown", since: source?.since ?? display?.since };
 }
 
 function withStatusIcon(
   target: Snapshot["targets"][number],
-  status: { label: string; tone?: string; icon?: ReactNode },
+  status: DeviceStatus,
   source?: Snapshot["sources"][number],
 ) {
+  const statusWithSince = status.since === undefined && source?.since !== undefined ? { ...status, since: source.since } : status;
   const isDoor = source?.property === "open" || String(target.capabilities?.product ?? "").toLowerCase().includes("door");
   const isLight = Boolean(target.capabilities?.power);
   const isPresence = source?.property === "presence" || String(target.capabilities?.product ?? "").toLowerCase().includes("presence");
   const isCover = Boolean(target.capabilities?.position || target.capabilities?.commands);
-  if (isDoor && status.label === "open") return { ...status, icon: <DoorOpen size={22} strokeWidth={2.2} aria-hidden="true" /> };
-  if (isDoor && status.label === "closed") return { ...status, icon: <DoorClosed size={22} strokeWidth={2.2} aria-hidden="true" /> };
-  if (isCover && status.label === "open") return { ...status, icon: <BlindStatusIcon state="open" /> };
-  if (isCover && status.label === "closed") return { ...status, icon: <BlindStatusIcon state="closed" /> };
-  if (isCover && status.label === "opening") return { ...status, icon: <BlindStatusIcon state="opening" /> };
-  if (isCover && status.label === "closing") return { ...status, icon: <BlindStatusIcon state="closing" /> };
-  if (isCover && status.label === "stopped") return { ...status, icon: <BlindStatusIcon state="stopped" /> };
-  if (isLight && status.label === "on") return { ...status, icon: <LightStatusIcon on /> };
-  if (isLight && status.label === "off") return { ...status, icon: <LightStatusIcon /> };
-  if (isPresence && status.label === "active") return { ...status, icon: <PresenceStatusIcon active /> };
-  if (isPresence && status.label === "clear") return { ...status, icon: <PresenceStatusIcon /> };
-  return status;
+  if (isDoor && status.label === "open") return { ...statusWithSince, icon: <DoorOpen size={22} strokeWidth={2.2} aria-hidden="true" /> };
+  if (isDoor && status.label === "closed") return { ...statusWithSince, icon: <DoorClosed size={22} strokeWidth={2.2} aria-hidden="true" /> };
+  if (isCover && status.label === "open") return { ...statusWithSince, icon: <BlindStatusIcon state="open" /> };
+  if (isCover && status.label === "closed") return { ...statusWithSince, icon: <BlindStatusIcon state="closed" /> };
+  if (isCover && status.label === "opening") return { ...statusWithSince, icon: <BlindStatusIcon state="opening" /> };
+  if (isCover && status.label === "closing") return { ...statusWithSince, icon: <BlindStatusIcon state="closing" /> };
+  if (isCover && status.label === "stopped") return { ...statusWithSince, icon: <BlindStatusIcon state="stopped" /> };
+  if (isLight && status.label === "on") return { ...statusWithSince, icon: <LightStatusIcon on /> };
+  if (isLight && status.label === "off") return { ...statusWithSince, icon: <LightStatusIcon /> };
+  if (isPresence && status.label === "active") return { ...statusWithSince, icon: <PresenceStatusIcon active /> };
+  if (isPresence && status.label === "clear") return { ...statusWithSince, icon: <PresenceStatusIcon /> };
+  return statusWithSince;
 }
 
 function LightStatusIcon({ on = false }: { on?: boolean }) {
@@ -1385,23 +1412,29 @@ function PresenceStatusIcon({ active = false }: { active?: boolean }) {
   );
 }
 
-function statusFromLayer(target: Snapshot["targets"][number], state: Record<string, unknown> | undefined, observed: unknown) {
+function statusFromLayer(
+  target: Snapshot["targets"][number],
+  surfaced: Snapshot["layers"][number]["surfaced"] | undefined,
+  state: Record<string, unknown> | undefined,
+  observed: unknown,
+  source?: Snapshot["sources"][number],
+) {
   if (!state) return undefined;
   if (target.capabilities?.position || target.capabilities?.commands) {
-    if (state.motion === "stop") return withStatusIcon(target, { label: "stopped", tone: "idle" });
+    if (state.motion === "stop") return withStatusIcon(target, { label: "stopped", tone: "idle", since: surfaced?.since });
     if (state.position === "open") {
       if (typeof observed === "number" && observed <= 5) return undefined;
-      return withStatusIcon(target, { label: "opening", tone: "opening" });
+      return withStatusIcon(target, { label: "opening", tone: "opening", since: surfaced?.since });
     }
     if (state.position === "closed") {
       if (typeof observed === "number" && observed >= 95) return undefined;
-      return withStatusIcon(target, { label: "closing", tone: "closing" });
+      return withStatusIcon(target, { label: "closing", tone: "closing", since: surfaced?.since });
     }
   }
   if ("power" in state) {
     return state.power === "off" || state.power === false
-      ? withStatusIcon(target, { label: "off", tone: "off" })
-      : withStatusIcon(target, { label: "on", tone: "on" });
+      ? withStatusIcon(target, { label: "off", tone: "off", since: source?.since ?? surfaced?.since }, source)
+      : withStatusIcon(target, { label: "on", tone: "on", since: source?.since ?? surfaced?.since }, source);
   }
   return undefined;
 }
@@ -1474,7 +1507,7 @@ function deviceLastUpdated(target: Snapshot["targets"][number], sourceById: Map<
   return candidateTimes.length ? Math.max(...candidateTimes) : undefined;
 }
 
-function DeviceStatusPill({ status }: { status: { label: string; tone?: string; icon?: ReactNode } }) {
+function DeviceStatusPill({ status, now }: { status: DeviceStatus; now: number }) {
   const classes: Record<string, string> = {
     on: "text-gaia-green",
     off: "text-gaia-muted",
@@ -1487,9 +1520,12 @@ function DeviceStatusPill({ status }: { status: { label: string; tone?: string; 
     warn: "text-gaia-orange",
     unknown: "text-gaia-muted",
   };
+  const duration = status.since ? formatForDuration(now - status.since) : undefined;
+  const title = duration ? `${status.label} ${duration}` : status.label;
   return (
-    <span className={`device-status ${classes[status.tone ?? "unknown"] ?? classes.unknown}`} title={status.label} aria-label={status.label}>
-      {status.icon ?? status.label}
+    <span className={`device-status ${classes[status.tone ?? "unknown"] ?? classes.unknown}`} title={title} aria-label={title}>
+      <span className="device-status-main">{status.icon ?? status.label}</span>
+      {duration ? <span className="device-status-duration">{duration}</span> : null}
     </span>
   );
 }
@@ -1663,6 +1699,18 @@ function formatDuration(ms: number) {
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;
+}
+
+function formatForDuration(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 5) return "now";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 function Stat({ label, value, tone }: { label: string; value: unknown; tone?: "ok" | "warn" }) {
