@@ -237,7 +237,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       }
       return;
     }
-    if (!source.update(update.value, update.observedAt)) {
+    if (!source.update(update.value, update.observedAt, { markUpdated: update.markUpdated })) {
       return;
     }
     if (update.provider === "matter") {
@@ -468,6 +468,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         ...source.binding,
         value: source.peek(),
         since: source.since(),
+        updatedAt: source.updated(),
       })),
       signals: [...this.signals.values()].map((signal) => ({
         id: signal.id,
@@ -509,6 +510,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   private targetDisplaySnapshot(target: TargetBinding) {
     const status = target.display?.status;
     const battery = target.display?.battery;
+    const rssi = target.display?.rssi;
     const metrics = target.display?.metrics;
     return {
       ...target.display,
@@ -517,6 +519,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
             ...status,
             value: this.sources.get(status.source)?.peek(),
             since: this.sources.get(status.source)?.since(),
+            updatedAt: this.sources.get(status.source)?.updated(),
           }
         : undefined,
       battery: battery
@@ -524,12 +527,22 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
             ...battery,
             value: this.sources.get(battery.source)?.peek(),
             since: this.sources.get(battery.source)?.since(),
+            updatedAt: this.sources.get(battery.source)?.updated(),
+          }
+        : undefined,
+      rssi: rssi
+        ? {
+            ...rssi,
+            value: this.sources.get(rssi.source)?.peek(),
+            since: this.sources.get(rssi.source)?.since(),
+            updatedAt: this.sources.get(rssi.source)?.updated(),
           }
         : undefined,
       metrics: metrics?.map((metric) => ({
         ...metric,
         value: this.sources.get(metric.source)?.peek(),
         since: this.sources.get(metric.source)?.since(),
+        updatedAt: this.sources.get(metric.source)?.updated(),
       })),
     };
   }

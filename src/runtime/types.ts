@@ -8,6 +8,7 @@ export type SourceUpdate = {
   value: unknown;
   provider: ProviderName;
   observedAt: number;
+  markUpdated?: boolean;
 };
 
 export type LayerName =
@@ -86,6 +87,12 @@ export type DeviceMetricDisplay = {
   unit?: string;
 };
 
+export type DeviceRssiDisplay = {
+  source: SourceId;
+  label?: string;
+  unit?: string;
+};
+
 export type TargetBinding = {
   target: TargetId;
   key: string;
@@ -94,6 +101,7 @@ export type TargetBinding = {
   display?: {
     status?: DeviceStatusDisplay;
     battery?: DeviceBatteryDisplay;
+    rssi?: DeviceRssiDisplay;
     metrics?: DeviceMetricDisplay[];
   };
 };

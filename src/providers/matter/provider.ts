@@ -14,6 +14,7 @@ export class MatterProvider implements ProviderAdapter {
   readonly name = "matter" as const;
   private runtime?: Runtime & { enqueueApply?: (target: string) => void; notifyProviderChanged?: (provider: "matter") => void };
   private sources: SourceBinding[] = [];
+  private sourceRefs = new Map<string, { updated: () => number | undefined }>();
   private targets = new Map<string, { target: string; capabilities: Record<string, any> }>();
   private ws?: WebSocket;
   private connected = false;
@@ -25,6 +26,11 @@ export class MatterProvider implements ProviderAdapter {
   private macByNode = new Map<number, string>();
   private availableByNode = new Map<number, boolean>();
   private offlineSinceByNode = new Map<number, number>();
+  private rssiByNode = new Map<number, number>();
+  private lastProbeByTarget = new Map<string, number>();
+  private probingTargets = new Set<string>();
+  private staleProbeTimer?: NodeJS.Timeout;
+  private staleProbeStartedAt = Date.now();
   private sourceByNodePath = new Map<string, SourceBinding[]>();
   private nextMessageId = 0;
   private pending = new Map<
@@ -47,7 +53,7 @@ export class MatterProvider implements ProviderAdapter {
 
   start(
     runtime: Runtime & {
-      sources?: Map<string, { binding: SourceBinding }>;
+      sources?: Map<string, { binding: SourceBinding; updated: () => number | undefined }>;
       targets?: Map<string, any>;
       enqueueApply?: (target: string) => void;
       notifyProviderChanged?: (provider: "matter") => void;
@@ -55,6 +61,12 @@ export class MatterProvider implements ProviderAdapter {
   ) {
     this.runtime = runtime;
     if (runtime.sources) {
+      this.sourceRefs = new Map(
+        [...runtime.sources.values()].map((source) => [
+          source.binding.source,
+          { updated: () => source.updated() },
+        ]),
+      );
       this.sources = [...runtime.sources.values()].map((source) => source.binding);
     }
     if (runtime.targets) {
@@ -66,6 +78,7 @@ export class MatterProvider implements ProviderAdapter {
       return;
     }
     this.connect();
+    this.startStaleProbeLoop();
   }
 
   async apply(command: DesiredCommand): Promise<CommandResult> {
@@ -133,24 +146,61 @@ export class MatterProvider implements ProviderAdapter {
       return { ok: true, dryRun: true, target };
     }
     const nodeId = this.nodeIdForTarget(target);
+    this.recordProbe(target);
     const started = Date.now();
-    try {
-      const response = await this.send(
-        {
-          command: "read_attribute",
-          args: {
-            node_id: nodeId,
-            attribute_path: "0/40/5",
+    const paths = this.probePathsForTarget(target, nodeId);
+    const reads: Array<{ path: string; ok: boolean; value?: unknown; error?: string; elapsedMs: number }> = [];
+    let ok = false;
+
+    for (const path of paths) {
+      const readStarted = Date.now();
+      try {
+        const response = await this.send(
+          {
+            command: "read_attribute",
+            args: {
+              node_id: nodeId,
+              attribute_path: path,
+            },
           },
-        },
-        5_000,
-      );
-      this.setNodeAvailability(nodeId, true);
-      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, result: (response as any).result };
-    } catch (error) {
-      this.setNodeAvailability(nodeId, false);
-      throw error;
+          5_000,
+        );
+        const value = this.valueFromReadResponse(response, path);
+        this.emitNodePath(nodeId, path, value);
+        reads.push({ path, ok: true, value, elapsedMs: Date.now() - readStarted });
+        ok = true;
+      } catch (error) {
+        reads.push({
+          path,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          elapsedMs: Date.now() - readStarted,
+        });
+      }
     }
+
+    this.setNodeAvailability(nodeId, ok);
+    if (ok) {
+      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, reads };
+    }
+    const firstError = reads.find((read) => !read.ok)?.error ?? "Matter probe failed";
+    throw new Error(firstError);
+  }
+
+  async refreshNodes() {
+    if (this.options.dryRun) {
+      return { ok: true, dryRun: true, nodeCount: 0 };
+    }
+    const response = await this.send(
+      {
+        command: "start_listening",
+        args: {},
+      },
+      15_000,
+    );
+    const nodes = Array.isArray((response as any).result) ? (response as any).result : [];
+    this.ingestNodes(nodes, { markSourcesUpdated: false });
+    return { ok: true, dryRun: false, nodeCount: nodes.length };
   }
 
   snapshot() {
@@ -167,6 +217,8 @@ export class MatterProvider implements ProviderAdapter {
         mac: this.macByNode.get(nodeId),
         available: this.availableByNode.get(nodeId),
         offlineSince: this.offlineSinceByNode.get(nodeId),
+        rssi: this.rssiByNode.get(nodeId),
+        lastProbeAt: this.lastProbeByTarget.get(key),
       })),
       unresolvedSources: this.sources
         .filter((source) => this.options.enabled !== false && source.provider === "matter" && !this.nodeByKey.has(source.key))
@@ -184,7 +236,6 @@ export class MatterProvider implements ProviderAdapter {
       ws.send(JSON.stringify({ message_id: "matter-layer-start", command: "start_listening", args: {} }));
     });
     ws.on("message", (data) => {
-      this.lastMessageAt = Date.now();
       const message = JSON.parse(data.toString());
       if (typeof message.message_id === "string") {
         const pending = this.pending.get(message.message_id);
@@ -200,12 +251,14 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
       if (message.message_id === "matter-layer-start" && Array.isArray(message.result)) {
-        this.ingestNodes(message.result);
+        this.ingestNodes(message.result, { markSourcesUpdated: false });
       }
       if (message.event === "node_updated" && message.data) {
+        this.lastMessageAt = Date.now();
         this.ingestNodes([message.data]);
       }
       if (message.event === "attribute_updated" || message.type === "attribute_updated") {
+        this.lastMessageAt = Date.now();
         this.ingestEvent(message.data ?? message);
       }
       if (
@@ -214,6 +267,7 @@ export class MatterProvider implements ProviderAdapter {
         message.type === "event" ||
         message.type === "event_triggered"
       ) {
+        this.lastMessageAt = Date.now();
         this.ingestDeviceEvent(message.data ?? message);
       }
     });
@@ -229,7 +283,7 @@ export class MatterProvider implements ProviderAdapter {
     });
   }
 
-  private ingestNodes(nodes: any[]) {
+  private ingestNodes(nodes: any[], options: { markSourcesUpdated?: boolean } = {}) {
     this.nodeCount = Math.max(this.nodeCount, nodes.length);
     let changed = false;
     for (const node of nodes) {
@@ -245,11 +299,20 @@ export class MatterProvider implements ProviderAdapter {
       if (Number.isFinite(nodeId) && mac) {
         this.macByNode.set(nodeId, mac);
       }
+      if (Number.isFinite(nodeId)) {
+        const rssi = threadRssiFromAttrs(attrs);
+        if (rssi === undefined) {
+          this.rssiByNode.delete(nodeId);
+        } else {
+          this.rssiByNode.set(nodeId, rssi);
+        }
+      }
       if (Number.isFinite(nodeId) && hasAvailable && this.availableByNode.get(nodeId) !== available) {
+        const wasAvailable = this.availableByNode.get(nodeId);
         this.availableByNode.set(nodeId, available);
         if (available) {
           this.offlineSinceByNode.delete(nodeId);
-        } else {
+        } else if (wasAvailable === true) {
           this.offlineSinceByNode.set(nodeId, Date.now());
         }
         changed = true;
@@ -268,7 +331,9 @@ export class MatterProvider implements ProviderAdapter {
           this.sourceByNodePath.set(nodePath, bindings);
         }
         if (binding.path in attrs) {
-          this.emit(binding, attrs[binding.path]);
+          this.emit(binding, attrs[binding.path], {
+            markUpdated: options.markSourcesUpdated,
+          });
         }
       }
       for (const target of this.targets.values()) {
@@ -276,7 +341,6 @@ export class MatterProvider implements ProviderAdapter {
           this.nodeByKey.set(target.target, nodeId);
           if (!this.resolvedTargets.has(target.target)) {
             this.resolvedTargets.add(target.target);
-            this.runtime?.enqueueApply?.(target.target);
           }
         }
       }
@@ -341,14 +405,141 @@ export class MatterProvider implements ProviderAdapter {
     }
   }
 
-  private emit(binding: SourceBinding, raw: unknown) {
+  private emit(binding: SourceBinding, raw: unknown, options: { markUpdated?: boolean } = {}) {
     const update: SourceUpdate = {
       source: binding.source,
       value: normalizeValue(binding, raw),
       provider: this.name,
       observedAt: Date.now(),
+      markUpdated: options.markUpdated,
     };
     this.runtime?.updateSource(update);
+  }
+
+  private emitNodePath(nodeId: number, path: string, raw: unknown) {
+    const bindings = this.sourceByNodePath.get(`${nodeId}:${path}`);
+    if (!bindings) {
+      return;
+    }
+    for (const binding of bindings) {
+      this.emit(binding, raw);
+    }
+  }
+
+  private probePathsForTarget(target: string, nodeId: number) {
+    const keys = new Set([target, parentTarget(target)]);
+    const paths = new Set<string>();
+    for (const binding of this.sources) {
+      if (binding.path && keys.has(binding.key)) {
+        paths.add(binding.path);
+      }
+    }
+    for (const nodePath of this.sourceByNodePath.keys()) {
+      const [mappedNodeId, path] = nodePath.split(":", 2);
+      if (Number(mappedNodeId) === nodeId && path) {
+        paths.add(path);
+      }
+    }
+    paths.add("0/40/5");
+    return [...paths];
+  }
+
+  private startStaleProbeLoop() {
+    const enabled = process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "0" && process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "false";
+    if (!enabled || this.staleProbeTimer) {
+      return;
+    }
+    const intervalMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_INTERVAL_SEC ?? "5") * 1000);
+    this.staleProbeTimer = setInterval(() => {
+      void this.probeStaleTargets();
+    }, intervalMs);
+    this.staleProbeTimer.unref?.();
+  }
+
+  private async probeStaleTargets() {
+    if (this.options.dryRun || !this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const availableStaleAfterMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_AFTER_SEC ?? "120") * 1000);
+    const unavailableStaleAfterMs = Math.max(
+      availableStaleAfterMs,
+      Number(process.env.MATTER_STALE_PROBE_UNAVAILABLE_AFTER_SEC ?? "300") * 1000,
+    );
+    const now = Date.now();
+    for (const target of this.targets.keys()) {
+      const nodeId = this.nodeByKey.get(target) ?? this.nodeByKey.get(parentTarget(target));
+      if (!nodeId || this.probingTargets.has(target)) {
+        continue;
+      }
+      const staleAfterMs = this.availableByNode.get(nodeId) === true ? availableStaleAfterMs : unavailableStaleAfterMs;
+      const sourceStats = this.sourceStatsForTarget(target, nodeId);
+      if (!sourceStats.hasSources) {
+        continue;
+      }
+      const lastUpdateAt = sourceStats.lastUpdateAt;
+      const lastProbeAt = this.lastProbeByTarget.get(target);
+      if ((lastUpdateAt ?? this.staleProbeStartedAt) > now - staleAfterMs) {
+        continue;
+      }
+      if (lastProbeAt !== undefined && now - lastProbeAt < staleAfterMs) {
+        continue;
+      }
+      this.probingTargets.add(target);
+      try {
+        await this.probeTarget(target);
+      } catch {
+        // Stale probes are opportunistic; availability is updated by probeTarget.
+      } finally {
+        this.probingTargets.delete(target);
+      }
+    }
+  }
+
+  private sourceStatsForTarget(target: string, nodeId: number) {
+    const keys = new Set([target, parentTarget(target)]);
+    const times: number[] = [];
+    let hasSources = false;
+    for (const binding of this.sources) {
+      if (binding.path && keys.has(binding.key)) {
+        hasSources = true;
+        const updatedAt = this.sourceRefs.get(binding.source)?.updated();
+        if (typeof updatedAt === "number") {
+          times.push(updatedAt);
+        }
+      }
+    }
+    for (const [nodePath, bindings] of this.sourceByNodePath) {
+      const [mappedNodeId] = nodePath.split(":", 1);
+      if (Number(mappedNodeId) !== nodeId) {
+        continue;
+      }
+      for (const binding of bindings) {
+        hasSources = true;
+        const updatedAt = this.sourceRefs.get(binding.source)?.updated();
+        if (typeof updatedAt === "number") {
+          times.push(updatedAt);
+        }
+      }
+    }
+    return { hasSources, lastUpdateAt: times.length ? Math.max(...times) : undefined };
+  }
+
+  private recordProbe(target: string) {
+    const now = Date.now();
+    this.lastProbeByTarget.set(target, now);
+    const parent = parentTarget(target);
+    if (parent !== target) {
+      this.lastProbeByTarget.set(parent, now);
+    }
+    this.runtime?.notifyProviderChanged?.(this.name);
+  }
+
+  private valueFromReadResponse(response: unknown, path: string) {
+    const result = (response as any)?.result;
+    if (result && typeof result === "object" && !Array.isArray(result) && path in result) {
+      return result[path];
+    }
+    return result;
   }
 
   private labelForKey(key: string) {
@@ -448,13 +639,14 @@ export class MatterProvider implements ProviderAdapter {
   }
 
   private setNodeAvailability(nodeId: number, available: boolean) {
-    if (this.availableByNode.get(nodeId) === available) {
+    const wasAvailable = this.availableByNode.get(nodeId);
+    if (wasAvailable === available) {
       return;
     }
     this.availableByNode.set(nodeId, available);
     if (available) {
       this.offlineSinceByNode.delete(nodeId);
-    } else {
+    } else if (wasAvailable === true) {
       this.offlineSinceByNode.set(nodeId, Date.now());
     }
     this.runtime?.notifyProviderChanged?.(this.name);
@@ -542,4 +734,36 @@ function macFromAttrs(attrs: Record<string, any>) {
     }
   }
   return null;
+}
+
+function threadRssiFromAttrs(attrs: Record<string, any>) {
+  const values: number[] = [];
+  const neighborTable = attrs["0/53/7"];
+  if (Array.isArray(neighborTable)) {
+    for (const entry of neighborTable) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const parsed = parseRssi((entry as Record<string, unknown>)["6"]);
+      if (parsed !== undefined) {
+        values.push(parsed);
+      }
+    }
+  }
+  return values.length ? Math.max(...values) : undefined;
+}
+
+function parseRssi(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const rounded = Math.round(value);
+  if (rounded >= -127 && rounded <= 0) {
+    return rounded;
+  }
+  if (rounded >= 128 && rounded <= 255) {
+    const signed = rounded - 256;
+    return signed >= -127 && signed <= 0 ? signed : undefined;
+  }
+  return undefined;
 }

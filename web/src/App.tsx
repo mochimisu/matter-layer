@@ -5,6 +5,7 @@ import {
   DoorClosed,
   DoorOpen,
   Lightbulb,
+  RefreshCw,
   UserRound,
   UserRoundCheck,
 } from "lucide-react";
@@ -50,6 +51,7 @@ function App() {
   const [roomFilter, setRoomFilter] = useState(() => roomFromLocation());
   const [logDeviceFilter, setLogDeviceFilter] = useState(() => logDeviceFromLocation());
   const [logAutomationFilter, setLogAutomationFilter] = useState(() => logAutomationFromLocation());
+  const [now, setNow] = useState(() => Date.now());
 
   async function load() {
     const response = await fetch("/api/snapshot");
@@ -112,6 +114,11 @@ function App() {
     document.body.classList.toggle("graph-page-active", tab === "graph");
     return () => document.body.classList.remove("graph-page-active");
   }, [tab]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   function selectTab(next: AppTab) {
     setTab(next);
@@ -222,6 +229,10 @@ function App() {
     }
   }
 
+  async function refreshMatter() {
+    await mutate("matter-refresh", "/api/matter/refresh", { method: "POST" });
+  }
+
   async function setAutomation(name: string, enabled: boolean) {
     await mutate(name, `/api/automations/${encodeURIComponent(name)}`, {
       method: "POST",
@@ -290,7 +301,16 @@ function App() {
             <div className="header-summary">
               <div className="header-matter-state">
                 <span>Matter</span>
-                <StatusPill status={matter?.status} />
+                <StatusPill status={matter?.status} now={now} />
+                <button
+                  className="header-icon-button"
+                  title="Refresh Matter snapshot"
+                  aria-label="Refresh Matter snapshot"
+                  disabled={busy === "matter-refresh"}
+                  onClick={() => void refreshMatter()}
+                >
+                  <RefreshCw size={14} strokeWidth={2.6} />
+                </button>
               </div>
               <label className="room-filter">
                 <span>Room</span>
@@ -326,7 +346,7 @@ function App() {
           <section className="gaia-panel">
             <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
               <h2 className="gaia-title">Provider</h2>
-              <StatusPill status={matter?.status} />
+              <StatusPill status={matter?.status} now={now} />
             </div>
             <div className="grid grid-cols-2 gap-px bg-gaia-line text-sm">
               <Stat label="Nodes" value={matter?.status?.nodeCount ?? 0} />
@@ -863,7 +883,10 @@ function DevicesOverview({
               const status = deviceStatus(target, sourceById, layer);
               const health = matterHealth(matter, binding);
               const battery = deviceBattery(target, sourceById);
+              const rssi = deviceRssi(target, sourceById, binding);
               const metrics = deviceMetrics(target, sourceById);
+              const updatedAt = deviceLastUpdated(target, sourceById);
+              const lastProbeAt = binding?.lastProbeAt;
               const vendor = String(target.capabilities?.vendor ?? "");
               const product = String(target.capabilities?.product ?? "");
               const label = binding?.label || target.key;
@@ -883,6 +906,13 @@ function DevicesOverview({
                   <span className="min-w-0 truncate text-xs text-gaia-muted">
                     {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
                   </span>
+                  <span className="min-w-0 truncate text-xs font-bold text-gaia-muted" title={updatedAt ? new Date(updatedAt).toLocaleString() : undefined}>
+                    {updatedAt ? formatRunTime(updatedAt) : "—"}
+                  </span>
+                  <span className="min-w-0 truncate text-xs font-bold text-gaia-muted" title={lastProbeAt ? new Date(lastProbeAt).toLocaleString() : undefined}>
+                    {lastProbeAt ? formatRunTime(lastProbeAt) : "—"}
+                  </span>
+                  <span className={deviceRssiClass(rssi.tone)}>{rssi.label}</span>
                   <span className="device-actions">
                     {renderDeviceActions(actions, busy)}
                   </span>
@@ -992,7 +1022,11 @@ function DeviceName({ label, details, offline, offlineSince }: { label: string; 
       </span>
       {position ? (
         <span className="device-name-tooltip" style={{ top: position.top, left: position.left }}>
-          {offline ? <span className="device-name-tooltip-offline">offline since {offlineSince ? formatRunTime(offlineSince) : "unknown"}</span> : null}
+          {offline ? (
+            <span className="device-name-tooltip-offline">
+              {offlineSince ? `offline since ${formatRunTime(offlineSince)}` : "offline"}
+            </span>
+          ) : null}
           {details.map((detail, index) => (
             <span key={`${detail}-${index}`} className={index === 0 ? "font-black text-gaia-ink" : ""}>
               {detail}
@@ -1393,6 +1427,30 @@ function deviceBattery(target: Snapshot["targets"][number], sourceById: Map<stri
   return { label, tone: value <= 20 ? "warn" : "ok" };
 }
 
+function deviceRssi(
+  target: Snapshot["targets"][number],
+  sourceById: Map<string, Snapshot["sources"][number]>,
+  binding?: MatterResolvedBinding,
+) {
+  const display = target.display?.rssi;
+  const value = display ? sourceById.get(display.source)?.value ?? display.value : binding?.rssi;
+  if (typeof value !== "number") return { label: "—", tone: "unknown" };
+  const rounded = Math.round(value);
+  const unit = display?.unit ?? "dBm";
+  const tone = rounded < -85 ? "bad" : rounded <= -70 ? "warn" : "ok";
+  return { label: `${rounded}${unit}`, tone };
+}
+
+function deviceRssiClass(tone: string) {
+  const classes: Record<string, string> = {
+    ok: "device-rssi device-rssi-ok",
+    warn: "device-rssi device-rssi-warn",
+    bad: "device-rssi device-rssi-bad",
+    unknown: "device-rssi device-rssi-unknown",
+  };
+  return classes[tone] ?? classes.unknown;
+}
+
 function deviceMetrics(target: Snapshot["targets"][number], sourceById: Map<string, Snapshot["sources"][number]>) {
   return (target.display?.metrics ?? []).flatMap((metric) => {
     const value = sourceById.get(metric.source)?.value ?? metric.value;
@@ -1400,6 +1458,20 @@ function deviceMetrics(target: Snapshot["targets"][number], sourceById: Map<stri
     const formatted = typeof value === "number" ? `${Math.round(value)}${metric.unit ?? ""}` : `${value}${metric.unit ?? ""}`;
     return [{ label: `${metric.label}: ${formatted}`, tone: "ok" }];
   });
+}
+
+function deviceLastUpdated(target: Snapshot["targets"][number], sourceById: Map<string, Snapshot["sources"][number]>) {
+  const displaySources = [
+    target.display?.status?.source,
+    target.display?.battery?.source,
+    target.display?.rssi?.source,
+    ...(target.display?.metrics ?? []).map((metric) => metric.source),
+  ].filter((source): source is string => Boolean(source));
+  const candidateTimes = [...sourceById.values()]
+    .filter((source) => source.key === target.key || displaySources.includes(source.source))
+    .map((source) => source.updatedAt)
+    .filter((value): value is number => typeof value === "number");
+  return candidateTimes.length ? Math.max(...candidateTimes) : undefined;
 }
 
 function DeviceStatusPill({ status }: { status: { label: string; tone?: string; icon?: ReactNode } }) {
@@ -1546,13 +1618,35 @@ function timedOpacity(activeUntil: number | undefined, fadeUntil: number | undef
   return Math.max(0, 1 - (now - activeUntil) / (fadeUntil - activeUntil));
 }
 
-function StatusPill({ status }: { status?: Snapshot["providers"][number]["status"] }) {
-  const enabled = status?.enabled;
-  const connected = status?.connected;
+function StatusPill({ status, now = Date.now() }: { status?: Snapshot["providers"][number]["status"]; now?: number }) {
+  const health = matterProviderHealth(status, now);
   const counts = matterAvailabilityCounts(status);
-  const label = enabled === false ? "Disabled" : counts ? `${counts.available}/${counts.total}` : connected ? "Connected" : "Offline";
-  const color = enabled === false ? "bg-gaia-yellow" : connected ? "bg-gaia-green" : "bg-gaia-red text-white";
-  return <span className={`rounded-gaia border border-gaia-ink px-2 py-0.5 text-[0.68rem] font-black uppercase ${color}`}>{label}</span>;
+  const label = health.label === "live" && counts ? `${counts.available}/${counts.total}` : health.label;
+  return (
+    <span
+      className={`rounded-gaia border border-gaia-ink px-2 py-0.5 text-[0.68rem] font-black uppercase ${health.color}`}
+      title={health.title}
+    >
+      {label}
+    </span>
+  );
+}
+
+function matterProviderHealth(status: Snapshot["providers"][number]["status"] | undefined, now: number) {
+  if (status?.enabled === false) {
+    return { label: "Disabled", color: "bg-gaia-yellow", title: "Matter provider is disabled" };
+  }
+  if (!status?.connected) {
+    return { label: "Offline", color: "bg-gaia-red text-white", title: "Matter websocket is disconnected" };
+  }
+  if (status.lastMessageAt && now - status.lastMessageAt > 180_000) {
+    return {
+      label: "Stale",
+      color: "bg-gaia-orange text-white",
+      title: `No Matter websocket messages for ${formatDuration(now - status.lastMessageAt)}`,
+    };
+  }
+  return { label: "live", color: "bg-gaia-green", title: status.lastMessageAt ? `Last message ${formatDuration(now - status.lastMessageAt)} ago` : "Matter websocket is connected" };
 }
 
 function matterAvailabilityCounts(status?: Snapshot["providers"][number]["status"]) {
@@ -1561,6 +1655,14 @@ function matterAvailabilityCounts(status?: Snapshot["providers"][number]["status
   if (!total) return null;
   const availableNodeIds = new Set((status.resolved ?? []).filter((binding) => binding.available === true).map((binding) => binding.nodeId));
   return { available: availableNodeIds.size, total };
+}
+
+function formatDuration(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
 }
 
 function Stat({ label, value, tone }: { label: string; value: unknown; tone?: "ok" | "warn" }) {

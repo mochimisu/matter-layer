@@ -10,6 +10,7 @@ const ledColors: Partial<Record<LayerName, string>> = {
 };
 
 export function innovelli(key: string, options: LightOptions = {}): Light {
+  const onDefaults = { level: "100%", ...(options.on ?? {}) };
   const device = light(key, {
     vendor: "Inovelli",
     product: "VTM31-SN",
@@ -31,6 +32,7 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
     },
     vendorCluster: 305134641,
     ...options,
+    on: onDefaults,
   });
   const led = device.endpoint(6).light("statusLed");
   led.set({ power: "off" }, { layer: "default", reason: "Status LED idle" });

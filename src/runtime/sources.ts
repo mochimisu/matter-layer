@@ -6,6 +6,7 @@ export class SourceRef<T = unknown> {
   readonly binding: SourceBinding;
   private current: T | undefined;
   private sinceAt: number | undefined;
+  private updatedAt: number | undefined;
 
   constructor(binding: SourceBinding) {
     this.source = binding.source;
@@ -25,7 +26,14 @@ export class SourceRef<T = unknown> {
     return this.sinceAt;
   }
 
-  update(value: T, observedAt = Date.now()): boolean {
+  updated(): number | undefined {
+    return this.updatedAt;
+  }
+
+  update(value: T, observedAt = Date.now(), options: { markUpdated?: boolean } = {}): boolean {
+    if (options.markUpdated !== false) {
+      this.updatedAt = observedAt;
+    }
     if (Object.is(this.current, value)) {
       return false;
     }

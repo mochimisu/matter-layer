@@ -80,6 +80,14 @@ button {
     background: rgba(48,55,42,0.72);
   }
 
+  .header-icon-button {
+    @apply grid h-7 w-7 place-items-center border border-white/35 bg-white/15 text-white transition disabled:cursor-wait disabled:opacity-55;
+  }
+
+  .header-icon-button:hover:not(:disabled) {
+    @apply bg-white/25;
+  }
+
   .room-filter select {
     @apply min-w-40 rounded-none border border-white/35 bg-[#f4f3ef] px-2 py-1 text-left text-[0.7rem] font-black uppercase text-gaia-ink outline-none;
   }
@@ -188,7 +196,7 @@ button {
 
   .device-table {
     @apply grid overflow-x-auto bg-transparent;
-    grid-template-columns: max-content max-content max-content minmax(7rem, 1fr) max-content max-content max-content;
+    grid-template-columns: max-content max-content max-content minmax(7rem, 1fr) max-content max-content max-content max-content max-content max-content;
     column-gap: 0;
   }
 
@@ -239,7 +247,10 @@ button {
 
   .device-table-row > span:nth-child(5),
   .device-table-row > span:nth-child(6),
-  .device-table-row > span:nth-child(7) {
+  .device-table-row > span:nth-child(7),
+  .device-table-row > span:nth-child(8),
+  .device-table-row > span:nth-child(9),
+  .device-table-row > span:nth-child(10) {
     @apply text-right;
   }
 
@@ -326,6 +337,26 @@ button {
 
   .device-ops .gaia-button {
     @apply whitespace-nowrap;
+  }
+
+  .device-rssi {
+    @apply min-w-0 truncate text-xs font-black;
+  }
+
+  .device-rssi-unknown {
+    color: #71787d;
+  }
+
+  .device-rssi-ok {
+    color: #5f9722;
+  }
+
+  .device-rssi-warn {
+    color: #d46f14;
+  }
+
+  .device-rssi-bad {
+    color: #c94f3d;
   }
 
   .device-op-button {

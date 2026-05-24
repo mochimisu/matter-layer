@@ -1,5 +1,5 @@
 export type Snapshot = {
-  sources: Array<{ source: string; key: string; property: string; value: unknown; since?: number }>;
+  sources: Array<{ source: string; key: string; property: string; value: unknown; since?: number; updatedAt?: number }>;
   signals: Array<{ id: string; value: unknown; deps: string[]; initialized: boolean; lastRunAt?: number }>;
   targets: Array<{
     target: string;
@@ -18,6 +18,15 @@ export type Snapshot = {
         label?: string;
         value?: unknown;
         since?: number;
+        updatedAt?: number;
+      };
+      rssi?: {
+        source: string;
+        label?: string;
+        unit?: string;
+        value?: unknown;
+        since?: number;
+        updatedAt?: number;
       };
       metrics?: Array<{
         source: string;
@@ -25,6 +34,7 @@ export type Snapshot = {
         unit?: string;
         value?: unknown;
         since?: number;
+        updatedAt?: number;
       }>;
     };
   }>;
@@ -58,7 +68,8 @@ export type Snapshot = {
       enabled?: boolean;
       connected?: boolean;
       nodeCount?: number;
-      resolved?: Array<{ key: string; nodeId: number; label?: string; mac?: string; available?: boolean; offlineSince?: number }>;
+      lastMessageAt?: number;
+      resolved?: Array<{ key: string; nodeId: number; label?: string; mac?: string; available?: boolean; offlineSince?: number; rssi?: number; lastProbeAt?: number }>;
       unresolvedSources?: string[];
       unresolvedTargets?: string[];
     } | null;

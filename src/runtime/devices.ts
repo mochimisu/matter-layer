@@ -3,6 +3,7 @@ import type {
   DesiredCommand,
   DeviceBatteryDisplay,
   DeviceMetricDisplay,
+  DeviceRssiDisplay,
   DeviceStatusDisplay,
   LayerName,
   LayerOutput,
@@ -58,6 +59,7 @@ export type LightOptions = Record<string, unknown> & {
   on?: Record<string, unknown>;
   status?: DeviceStatusOptions;
   battery?: DeviceBatteryOptions;
+  rssi?: DeviceRssiOptions;
   metrics?: DeviceMetricOptions[];
 };
 
@@ -82,6 +84,14 @@ export type DeviceMetricOptions = {
   path: string;
   encoding?: string;
   label: string;
+  unit?: string;
+};
+
+export type DeviceRssiOptions = {
+  property?: string;
+  path: string;
+  encoding?: string;
+  label?: string;
   unit?: string;
 };
 
@@ -121,6 +131,7 @@ export class TargetDevice {
     this.defaults = defaults;
     const status = registerDeviceStatus(key, capabilities.status as DeviceStatusOptions | undefined);
     const battery = registerDeviceBattery(key, capabilities.battery as DeviceBatteryOptions | undefined);
+    const rssi = registerDeviceRssi(key, capabilities.rssi as DeviceRssiOptions | undefined);
     const metrics = registerDeviceMetrics(key, capabilities.metrics as DeviceMetricOptions[] | undefined);
     runtime().registerTarget({
       target: key,
@@ -130,6 +141,7 @@ export class TargetDevice {
       display: {
         status,
         battery,
+        rssi,
         metrics,
       },
     });
@@ -335,6 +347,7 @@ export function matterDevice(
     lux?: { path?: string; encoding?: string };
     status?: DeviceStatusOptions;
     battery?: DeviceBatteryOptions;
+    rssi?: DeviceRssiOptions;
     metrics?: DeviceMetricOptions[];
   } & Record<string, unknown>,
 ) {
@@ -381,6 +394,22 @@ function registerDeviceBattery(key: string, battery?: DeviceBatteryOptions): Dev
   };
 }
 
+function registerDeviceRssi(key: string, rssi?: DeviceRssiOptions): DeviceRssiDisplay | undefined {
+  if (!rssi?.path) return undefined;
+  const source = makeSource({
+    key,
+    property: rssi.property ?? "rssi",
+    path: rssi.path,
+    encoding: rssi.encoding,
+  });
+  runtime().registerSource(source);
+  return {
+    source: source.source,
+    label: rssi.label,
+    unit: rssi.unit ?? "dBm",
+  };
+}
+
 function registerDeviceMetrics(key: string, metrics: DeviceMetricOptions[] | undefined): DeviceMetricDisplay[] | undefined {
   if (!metrics?.length) return undefined;
   return metrics.map((metric) => {
@@ -422,7 +451,7 @@ function normalizeAutoValue(value: boolean | Record<string, unknown> | null | un
     return { ...defaults };
   }
   if (value === false) {
-    return null;
+    return { power: "off" };
   }
   if (value == null) {
     return null;

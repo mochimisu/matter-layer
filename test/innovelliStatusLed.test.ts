@@ -13,6 +13,56 @@ async function tick() {
 }
 
 describe("Inovelli status LED rule", () => {
+  it("uses full brightness for automation on when no explicit level is configured", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light");
+        }),
+      ],
+      rules: [
+        defineRoomRules("room", ({ room, rule }) => {
+          rule("light", () => room.light.auto(true));
+        }),
+      ],
+    });
+    await runtime.start();
+
+    expect(runtime.layers.surface("room.light")).toMatchObject({
+      layer: "automation",
+      output: {
+        state: { power: "on", level: "100%" },
+      },
+    });
+    runtime.stop();
+  });
+
+  it("preserves explicit automation on levels", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light", { on: { level: "40%" } });
+        }),
+      ],
+      rules: [
+        defineRoomRules("room", ({ room, rule }) => {
+          rule("light", () => room.light.auto(true));
+        }),
+      ],
+    });
+    await runtime.start();
+
+    expect(runtime.layers.surface("room.light")).toMatchObject({
+      layer: "automation",
+      output: {
+        state: { power: "on", level: "40%" },
+      },
+    });
+    runtime.stop();
+  });
+
   it("uses 10% brightness for an off web override", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     runtime.loadModules({

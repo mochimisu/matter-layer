@@ -117,6 +117,15 @@ async function main() {
     }
   });
 
+  app.post("/api/matter/refresh", async (_req, res) => {
+    try {
+      const result = await matterProvider.refreshNodes();
+      res.json({ result, snapshot: runtime.snapshot() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.post("/api/automations/:name", (req, res) => {
     const enabled = Boolean(req.body?.enabled);
     if (!runtime.setRuleEnabled(req.params.name, enabled)) {
@@ -329,6 +338,7 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
               ...source.binding,
               value: source.peek(),
               since: source.since(),
+              updatedAt: source.updated(),
             },
             log: event.update.provider === "matter" ? runtime.matterLog.at(-1) : undefined,
           }

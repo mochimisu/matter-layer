@@ -221,7 +221,7 @@ describe("MatterProvider command translation", () => {
         label: "Room Light",
         mac: undefined,
         available: false,
-        offlineSince: expect.any(Number),
+        offlineSince: undefined,
       },
     ]);
 
@@ -229,5 +229,182 @@ describe("MatterProvider command translation", () => {
 
     expect(internals.snapshot().resolved[0].available).toBe(true);
     expect(internals.snapshot().resolved[0].offlineSince).toBeUndefined();
+
+    internals.ingestNodes([{ node_id: 123, available: false, attributes: { "0/40/5": "Room Light" } }]);
+
+    expect(internals.snapshot().resolved[0].available).toBe(false);
+    expect(internals.snapshot().resolved[0].offlineSince).toEqual(expect.any(Number));
+  });
+
+  it("summarizes Thread neighbor-table RSSI in the provider snapshot", () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    internals.targets.set("room.router", {
+      target: "room.router",
+      capabilities: {},
+    });
+
+    internals.ingestNodes([
+      {
+        node_id: 123,
+        attributes: {
+          "0/40/5": "Room Router",
+          "0/53/7": [
+            { "6": -82 },
+            { "6": 201 },
+            { "6": -54 },
+          ],
+        },
+      },
+    ]);
+
+    expect(internals.snapshot().resolved[0]).toMatchObject({
+      key: "room.router",
+      nodeId: 123,
+      rssi: -54,
+    });
+  });
+
+  it("refreshes bound source values during a target probe", async () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const updates: Array<{ source: string; value: unknown }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown }) {
+        updates.push({ source: update.source, value: update.value });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.nodeByKey.set("room.light", 123);
+    internals.sources = [
+      {
+        source: "room.light.power",
+        key: "room.light",
+        property: "power",
+        provider: "matter",
+        path: "1/6/0",
+      },
+    ];
+    internals.sourceByNodePath.set("123:1/6/0", [internals.sources[0]]);
+    internals.send = async (message: { args: { attribute_path: string } }) => ({
+      result: { [message.args.attribute_path]: message.args.attribute_path === "1/6/0" ? true : "Room Light" },
+    });
+
+    const result = await provider.probeTarget("room.light");
+
+    expect(result).toMatchObject({
+      ok: true,
+      nodeId: 123,
+      reads: expect.arrayContaining([
+        expect.objectContaining({ path: "1/6/0", ok: true, value: true }),
+        expect.objectContaining({ path: "0/40/5", ok: true, value: "Room Light" }),
+      ]),
+    });
+    expect(updates).toEqual([{ source: "room.light.power", value: true }]);
+  });
+
+  it("probes resolved available targets with stale source updates", async () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const source = {
+      source: "room.light.power",
+      key: "room.light",
+      property: "power",
+      provider: "matter",
+      path: "1/6/0",
+    };
+    const updates: Array<{ source: string; value: unknown }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown }) {
+        updates.push({ source: update.source, value: update.value });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.connected = true;
+    internals.ws = { readyState: 1 };
+    internals.targets.set("room.light", { target: "room.light", capabilities: {} });
+    internals.sources = [source];
+    internals.sourceRefs.set(source.source, { updated: () => Date.now() - 121_000 });
+    internals.nodeByKey.set("room.light", 123);
+    internals.availableByNode.set(123, true);
+    internals.sourceByNodePath.set("123:1/6/0", [source]);
+    internals.send = async (message: { args: { attribute_path: string } }) => ({
+      result: { [message.args.attribute_path]: message.args.attribute_path === "1/6/0" ? false : "Room Light" },
+    });
+
+    await internals.probeStaleTargets();
+
+    expect(updates).toEqual([{ source: "room.light.power", value: false }]);
+    expect(internals.lastProbeByTarget.get("room.light")).toEqual(expect.any(Number));
+  });
+
+  it("skips stale probing for fresh source updates", async () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const source = {
+      source: "room.light.power",
+      key: "room.light",
+      property: "power",
+      provider: "matter",
+      path: "1/6/0",
+    };
+    let readCount = 0;
+    internals.runtime = {
+      updateSource() {},
+      notifyProviderChanged() {},
+    };
+    internals.connected = true;
+    internals.ws = { readyState: 1 };
+    internals.targets.set("room.light", { target: "room.light", capabilities: {} });
+    internals.sources = [source];
+    internals.sourceRefs.set(source.source, { updated: () => Date.now() });
+    internals.nodeByKey.set("room.light", 123);
+    internals.availableByNode.set(123, true);
+    internals.sourceByNodePath.set("123:1/6/0", [source]);
+    internals.send = async () => {
+      readCount += 1;
+      return { result: {} };
+    };
+
+    await internals.probeStaleTargets();
+
+    expect(readCount).toBe(0);
+    expect(internals.lastProbeByTarget.get("room.light")).toBeUndefined();
+  });
+
+  it("probes unavailable targets after the slower stale window", async () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const source = {
+      source: "room.light.power",
+      key: "room.light",
+      property: "power",
+      provider: "matter",
+      path: "1/6/0",
+    };
+    const updates: Array<{ source: string; value: unknown }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown }) {
+        updates.push({ source: update.source, value: update.value });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.connected = true;
+    internals.ws = { readyState: 1 };
+    internals.targets.set("room.light", { target: "room.light", capabilities: {} });
+    internals.sources = [source];
+    internals.sourceRefs.set(source.source, { updated: () => Date.now() - 301_000 });
+    internals.nodeByKey.set("room.light", 123);
+    internals.availableByNode.set(123, false);
+    internals.sourceByNodePath.set("123:1/6/0", [source]);
+    internals.send = async (message: { args: { attribute_path: string } }) => ({
+      result: { [message.args.attribute_path]: message.args.attribute_path === "1/6/0" ? true : "Room Light" },
+    });
+
+    await internals.probeStaleTargets();
+
+    expect(updates).toEqual([{ source: "room.light.power", value: true }]);
+    expect(internals.availableByNode.get(123)).toBe(true);
+    expect(internals.lastProbeByTarget.get("room.light")).toEqual(expect.any(Number));
   });
 });
