@@ -278,13 +278,27 @@ async function main() {
       }
     });
   } else {
-    app.use(express.static(join(rootDir, "dist/web")));
+    const webDistDir = join(rootDir, "dist/web");
+    app.use(
+      express.static(webDistDir, {
+        setHeaders(res, path) {
+          if (path.endsWith("index.html")) {
+            res.setHeader("Cache-Control", "no-store");
+          }
+        },
+      }),
+    );
     app.use((req, res, next) => {
       if (req.method !== "GET" || req.path.startsWith("/api/") || req.path === "/events") {
         next();
         return;
       }
-      res.sendFile(join(rootDir, "dist/web/index.html"));
+      if (req.path.startsWith("/assets/")) {
+        res.status(404).type("text/plain").send("Not found");
+        return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.sendFile(join(webDistDir, "index.html"));
     });
   }
 
