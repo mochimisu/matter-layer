@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { loadConfig } from "./config/config";
+import { parseEpaperRenderOptions, renderRoomEpaperPanelPng, renderRoomEpaperPanelSvg } from "./epaper";
 import { MatterProvider } from "./providers/matter/provider";
 import { MatterLayerRuntime } from "./runtime/engine";
 import { loadRulesModule } from "./runtime/load";
@@ -67,6 +68,38 @@ async function main() {
 
   app.get("/api/graph", (_req, res) => {
     res.json(runtime.graph());
+  });
+
+  app.get("/api/epaper/office.svg", (req, res) => {
+    const svg = renderRoomEpaperPanelSvg(runtime.snapshot(), { ...parseEpaperRenderOptions(req.query), room: "office" });
+    res.setHeader("Cache-Control", "no-store");
+    res.type("image/svg+xml").send(svg);
+  });
+
+  app.get("/api/epaper/office.png", async (req, res) => {
+    try {
+      const png = await renderRoomEpaperPanelPng(runtime.snapshot(), { ...parseEpaperRenderOptions(req.query), room: "office" });
+      res.setHeader("Cache-Control", "no-store");
+      res.type("image/png").send(png);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get("/api/epaper/:room.svg", (req, res) => {
+    const svg = renderRoomEpaperPanelSvg(runtime.snapshot(), { ...parseEpaperRenderOptions(req.query), room: req.params.room });
+    res.setHeader("Cache-Control", "no-store");
+    res.type("image/svg+xml").send(svg);
+  });
+
+  app.get("/api/epaper/:room.png", async (req, res) => {
+    try {
+      const png = await renderRoomEpaperPanelPng(runtime.snapshot(), { ...parseEpaperRenderOptions(req.query), room: req.params.room });
+      res.setHeader("Cache-Control", "no-store");
+      res.type("image/png").send(png);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.post("/api/devices/:target/web-override", (req, res) => {
@@ -407,6 +440,8 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
       };
     case "device.event":
       return { type: "event" };
+    case "matter.log":
+      return { type: "matterLog", log: event.log };
   }
 }
 

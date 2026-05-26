@@ -383,6 +383,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     return true;
   }
 
+  logMatter(entry: Omit<MatterLogEntry, "id">) {
+    const log = this.recordMatterLog(entry);
+    this.emit({ type: "matter.log", log });
+    return log;
+  }
+
   private dispatchSourceChange(update: SourceUpdate) {
     const handlers = this.sourceHandlers.get(update.source);
     if (!handlers) {
@@ -579,10 +585,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   }
 
   private recordMatterLog(entry: Omit<MatterLogEntry, "id">) {
-    this.matterLog.push({ id: ++this.nextMatterLogId, ...entry });
+    const log = { id: ++this.nextMatterLogId, ...entry };
+    this.matterLog.push(log);
     if (this.matterLog.length > 200) {
       this.matterLog.splice(0, this.matterLog.length - 200);
     }
+    return log;
   }
 
   private layerFingerprint(target: string) {

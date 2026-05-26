@@ -168,7 +168,7 @@ export class TargetDevice {
 
   endpoint(endpointId: number) {
     return {
-      light: (name: string) =>
+      light: (name: string, capabilities: Record<string, unknown> = {}) =>
         new TargetDevice(`${this.key}.endpoint.${endpointId}.${name}`, {
           power: {
             path: `${endpointId}/6/0`,
@@ -185,6 +185,7 @@ export class TargetDevice {
             endpoint: endpointId,
             cluster: 768,
           },
+          ...capabilities,
         }),
     };
   }

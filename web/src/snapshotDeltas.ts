@@ -49,7 +49,7 @@ export type Snapshot = {
     id: number;
     at: number;
     direction: "received" | "sent";
-    kind: "source" | "command";
+    kind: "source" | "command" | "ping" | "probe" | "event";
     subject: string;
     key?: string;
     property?: string;
@@ -58,6 +58,13 @@ export type Snapshot = {
     reason?: string;
     ok?: boolean;
     error?: string;
+    nodeId?: number;
+    endpoint?: number;
+    clusterId?: number;
+    eventId?: number;
+    eventName?: string;
+    event?: string;
+    elapsedMs?: number;
   }>;
   events: string[];
   eventActions?: Array<{ name: string; event: string; outputs: string[]; lastRunAt?: number }>;
@@ -82,7 +89,8 @@ export type SnapshotDelta =
   | { type: "rule"; rule: Snapshot["rules"][number] }
   | { type: "layer"; layer: Snapshot["layers"][number] }
   | { type: "provider"; provider: Snapshot["providers"][number] }
-  | { type: "command"; command: unknown; log?: NonNullable<Snapshot["matterLog"]>[number] };
+  | { type: "command"; command: unknown; log?: NonNullable<Snapshot["matterLog"]>[number] }
+  | { type: "matterLog"; log: NonNullable<Snapshot["matterLog"]>[number] };
 
 export type LiveMessage =
   | { type: "snapshot"; seq: number; snapshot: Snapshot }
@@ -113,6 +121,11 @@ export function applySnapshotDelta(snapshot: Snapshot, delta: SnapshotDelta): Sn
       return {
         ...snapshot,
         commands: [...(snapshot.commands ?? []), delta.command].slice(-50),
+        matterLog: appendLog(snapshot.matterLog, delta.log),
+      };
+    case "matterLog":
+      return {
+        ...snapshot,
         matterLog: appendLog(snapshot.matterLog, delta.log),
       };
   }

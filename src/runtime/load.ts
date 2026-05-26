@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import fg from "fast-glob";
 import type { RoomModule, Ruleset } from "./dsl";
 
-export async function loadRules(root = "src/rooms"): Promise<Ruleset> {
+export async function loadRules(root: string): Promise<Ruleset> {
   const deviceFiles = await fg("*.devices.ts", { cwd: root, absolute: true });
   const ruleFiles = await fg("*.rules.ts", { cwd: root, absolute: true });
   const devices = await loadModules(deviceFiles.sort());

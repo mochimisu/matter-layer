@@ -47,7 +47,7 @@ export type MatterLogEntry = {
   id: number;
   at: number;
   direction: "received" | "sent";
-  kind: "source" | "command";
+  kind: "source" | "command" | "ping" | "probe" | "event";
   subject: string;
   key?: string;
   property?: string;
@@ -56,6 +56,13 @@ export type MatterLogEntry = {
   reason?: string;
   ok?: boolean;
   error?: string;
+  nodeId?: number;
+  endpoint?: number;
+  clusterId?: number;
+  eventId?: number;
+  eventName?: string;
+  event?: string;
+  elapsedMs?: number;
 };
 
 export type SourceBinding = {
@@ -132,7 +139,8 @@ export type RuntimeEvent =
   | { type: "device.event"; event: string }
   | { type: "provider.changed"; provider: ProviderName }
   | { type: "layer.changed"; target: string; layer: LayerName; output: LayerOutput | null }
-  | { type: "command"; result: CommandResult };
+  | { type: "command"; result: CommandResult }
+  | { type: "matter.log"; log: MatterLogEntry };
 
 export type ProviderAdapter = {
   name: ProviderName;

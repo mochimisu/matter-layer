@@ -84,6 +84,9 @@ export function normalizeValue(binding: SourceBinding, raw: unknown) {
   if (binding.encoding === "matter-humidity" && typeof raw === "number") {
     value = raw / 100;
   }
+  if (binding.encoding === "matter-temperature" && typeof raw === "number") {
+    value = raw / 100;
+  }
   if ("when" in binding && binding.when !== undefined) {
     value =
       typeof binding.when === "boolean"

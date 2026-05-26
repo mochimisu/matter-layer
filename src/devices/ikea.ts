@@ -1,4 +1,4 @@
-import { contact, light } from "matter-layer/devices";
+import { contact, light, matterDevice } from "matter-layer/devices";
 
 export function myggbett(key: string) {
   return contact(key, {
@@ -34,5 +34,16 @@ export function kajplats(key: string) {
       cluster: 768,
       endpoint: 1,
     },
+  });
+}
+
+export function alpstuga(key: string) {
+  return matterDevice(key, {
+    vendor: "IKEA of Sweden",
+    product: "ALPSTUGA air quality sensor",
+    metrics: [
+      { property: "temperature", label: "Temp", path: "1/1026/0", encoding: "matter-temperature", unit: "°" },
+      { property: "co2", label: "CO2", path: "1/1037/0", unit: "ppm" },
+    ],
   });
 }

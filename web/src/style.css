@@ -463,6 +463,43 @@ button {
     @apply text-gaia-red;
   }
 
+  .epaper-preview-panel {
+    @apply overflow-hidden;
+  }
+
+  .epaper-preview-stage {
+    @apply grid gap-6 overflow-auto bg-[#d9d9d4] p-4;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+    min-height: calc(100vh - 180px);
+    align-items: start;
+  }
+
+  .epaper-preview-item {
+    @apply grid gap-2 justify-items-center;
+  }
+
+  .epaper-preview-label {
+    @apply flex w-full max-w-[800px] items-center justify-between gap-3 text-[0.7rem] font-black uppercase text-gaia-ink;
+  }
+
+  .epaper-preview-label code {
+    @apply bg-white/70 px-2 py-1 text-[0.65rem] normal-case text-gaia-muted;
+  }
+
+  .epaper-generated-at {
+    @apply w-full max-w-[800px] text-right text-[0.68rem] font-black uppercase tracking-wide text-gaia-muted;
+  }
+
+  .epaper-image {
+    display: block;
+    width: min(100%, 800px);
+    aspect-ratio: 800 / 480;
+    background: #fbfbf6;
+    border: 1px solid #111;
+    box-shadow: 8px 8px 0 rgba(17,17,17,0.18);
+    image-rendering: pixelated;
+  }
+
   .graph-column {
     @apply relative space-y-2 border border-gaia-line bg-white/55 p-2;
     background-image:

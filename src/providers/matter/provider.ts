@@ -4,15 +4,22 @@ import { normalizeValue } from "../../runtime/sources";
 import type {
   CommandResult,
   DesiredCommand,
+  MatterLogEntry,
   ProviderAdapter,
   Runtime,
   SourceBinding,
   SourceUpdate,
 } from "../../runtime/types";
 
+type MatterRuntimeLogEntry = Omit<MatterLogEntry, "id">;
+
 export class MatterProvider implements ProviderAdapter {
   readonly name = "matter" as const;
-  private runtime?: Runtime & { enqueueApply?: (target: string) => void; notifyProviderChanged?: (provider: "matter") => void };
+  private runtime?: Runtime & {
+    enqueueApply?: (target: string) => void;
+    notifyProviderChanged?: (provider: "matter") => void;
+    logMatter?: (entry: MatterRuntimeLogEntry) => void;
+  };
   private sources: SourceBinding[] = [];
   private sourceRefs = new Map<string, { updated: () => number | undefined }>();
   private targets = new Map<string, { target: string; capabilities: Record<string, any> }>();
@@ -30,10 +37,15 @@ export class MatterProvider implements ProviderAdapter {
   private rssiByNode = new Map<number, number>();
   private lastProbeByTarget = new Map<string, number>();
   private lastProbeByNode = new Map<number, number>();
+  private lastPingByNode = new Map<number, number>();
+  private lastSourceProbeByNode = new Map<number, number>();
   private probingTargets = new Set<string>();
   private staleProbeTimer?: NodeJS.Timeout;
   private staleProbeRunning = false;
   private staleProbeStartedAt = Date.now();
+  private remoteKeepaliveTimer?: NodeJS.Timeout;
+  private remoteKeepaliveRunning = false;
+  private remoteKeepaliveCursor = 0;
   private recentInitialPressByEndpoint = new Map<string, number>();
   private sourceByNodePath = new Map<string, SourceBinding[]>();
   private nextMessageId = 0;
@@ -83,6 +95,7 @@ export class MatterProvider implements ProviderAdapter {
     }
     this.connect();
     this.startStaleProbeLoop();
+    this.startRemoteKeepaliveLoop();
   }
 
   async apply(command: DesiredCommand): Promise<CommandResult> {
@@ -135,23 +148,49 @@ export class MatterProvider implements ProviderAdapter {
     }
     const nodeId = this.nodeIdForTarget(target);
     this.recordProbe(target);
+    this.lastProbeByNode.set(nodeId, Date.now());
+    this.lastPingByNode.set(nodeId, Date.now());
     const started = Date.now();
     try {
       const response = await this.send({ command: "ping_node", args: { node_id: nodeId } }, 15_000);
       const result = (response as any).result;
       const ok = pingResultIsReachable(result);
+      const elapsedMs = Date.now() - started;
       this.setNodeAvailability(nodeId, ok);
+      this.runtime?.logMatter?.({
+        at: Date.now(),
+        direction: "sent",
+        kind: "ping",
+        subject: target,
+        key: target,
+        nodeId,
+        value: result,
+        ok,
+        elapsedMs,
+        ...(ok ? {} : { error: "Matter ping failed" }),
+      });
       return {
         ok,
         dryRun: false,
         target,
         nodeId,
-        elapsedMs: Date.now() - started,
+        elapsedMs,
         result,
         ...(ok ? {} : { error: "Matter ping failed" }),
       };
     } catch (error) {
       this.setNodeAvailability(nodeId, false);
+      this.runtime?.logMatter?.({
+        at: Date.now(),
+        direction: "sent",
+        kind: "ping",
+        subject: target,
+        key: target,
+        nodeId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        elapsedMs: Date.now() - started,
+      });
       throw error;
     }
   }
@@ -162,6 +201,8 @@ export class MatterProvider implements ProviderAdapter {
     }
     const nodeId = this.nodeIdForTarget(target);
     this.recordProbe(target);
+    this.lastProbeByNode.set(nodeId, Date.now());
+    this.lastSourceProbeByNode.set(nodeId, Date.now());
     const started = Date.now();
     const paths = this.probePathsForTarget(target, nodeId);
     const reads: Array<{ path: string; ok: boolean; value?: unknown; error?: string; elapsedMs: number }> = [];
@@ -196,9 +237,33 @@ export class MatterProvider implements ProviderAdapter {
 
     this.setNodeAvailability(nodeId, ok);
     if (ok) {
-      return { ok: true, dryRun: false, target, nodeId, elapsedMs: Date.now() - started, reads };
+      const elapsedMs = Date.now() - started;
+      this.runtime?.logMatter?.({
+        at: Date.now(),
+        direction: "sent",
+        kind: "probe",
+        subject: target,
+        key: target,
+        nodeId,
+        value: reads,
+        ok: true,
+        elapsedMs,
+      });
+      return { ok: true, dryRun: false, target, nodeId, elapsedMs, reads };
     }
     const firstError = reads.find((read) => !read.ok)?.error ?? "Matter probe failed";
+    this.runtime?.logMatter?.({
+      at: Date.now(),
+      direction: "sent",
+      kind: "probe",
+      subject: target,
+      key: target,
+      nodeId,
+      value: reads,
+      ok: false,
+      error: firstError,
+      elapsedMs: Date.now() - started,
+    });
     throw new Error(firstError);
   }
 
@@ -214,7 +279,7 @@ export class MatterProvider implements ProviderAdapter {
       15_000,
     );
     const nodes = Array.isArray((response as any).result) ? (response as any).result : [];
-    this.ingestNodes(nodes, { markSourcesUpdated: false });
+    this.ingestNodes(nodes, { emitSourceValues: false });
     return { ok: true, dryRun: false, nodeCount: nodes.length };
   }
 
@@ -267,11 +332,11 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
       if (message.message_id === "matter-layer-start" && Array.isArray(message.result)) {
-        this.ingestNodes(message.result, { markSourcesUpdated: false });
+        this.ingestNodes(message.result, { emitSourceValues: false });
       }
       if (message.event === "node_updated" && message.data) {
         this.lastMessageAt = Date.now();
-        this.ingestNodes([message.data]);
+        this.ingestNodes([message.data], { emitSourceValues: false });
       }
       if (message.event === "attribute_updated" || message.type === "attribute_updated") {
         this.lastMessageAt = Date.now();
@@ -317,7 +382,7 @@ export class MatterProvider implements ProviderAdapter {
     this.listenRefreshTimer.unref?.();
   }
 
-  private ingestNodes(nodes: any[], options: { markSourcesUpdated?: boolean } = {}) {
+  private ingestNodes(nodes: any[], options: { markSourcesUpdated?: boolean; emitSourceValues?: boolean } = {}) {
     this.nodeCount = Math.max(this.nodeCount, nodes.length);
     let changed = false;
     for (const node of nodes) {
@@ -364,7 +429,7 @@ export class MatterProvider implements ProviderAdapter {
           }
           this.sourceByNodePath.set(nodePath, bindings);
         }
-        if (binding.path in attrs) {
+        if (options.emitSourceValues !== false && binding.path in attrs) {
           this.emit(binding, attrs[binding.path], {
             markUpdated: options.markSourcesUpdated,
           });
@@ -417,6 +482,9 @@ export class MatterProvider implements ProviderAdapter {
     const eventName = event.event_name ?? event.eventName ?? event.event ?? event.name;
     const eventId = Number(event.event_id ?? event.eventId);
     const clusterId = Number(event.cluster_id ?? event.clusterId ?? event.cluster);
+    const matches = [...this.nodeByKey].filter(([, mappedNodeId]) => mappedNodeId === nodeId);
+    const subject = matches[0]?.[0] ?? `node:${nodeId}`;
+    let dispatchedEvent: string | undefined;
     for (const [key, mappedNodeId] of this.nodeByKey) {
       if (mappedNodeId !== nodeId) {
         continue;
@@ -426,17 +494,35 @@ export class MatterProvider implements ProviderAdapter {
       if (buttons && this.shouldDispatchButtonPress(key, nodeId, endpoint, eventName, eventId, target?.capabilities?.events?.initialPress)) {
         const button = Object.entries(buttons).find(([, spec]) => spec.endpoint === endpoint)?.[0];
         if (button && clusterId === 59) {
-          this.runtimeWithEvents().dispatchEvent?.(`${key}.button.${button}.initialPress`);
+          const runtimeEvent = `${key}.button.${button}.initialPress`;
+          this.runtimeWithEvents().dispatchEvent?.(runtimeEvent);
+          dispatchedEvent ??= runtimeEvent;
         }
       }
       if (target?.capabilities?.switch && (String(eventName).toLowerCase().includes("initial") || eventId === 1)) {
         const spec = target.capabilities.switch as { cluster?: number; upEndpoint?: number; downEndpoint?: number };
         const direction = endpoint === (spec.upEndpoint ?? 1) ? "up" : endpoint === (spec.downEndpoint ?? 2) ? "down" : undefined;
         if (direction && clusterId === 59) {
-          this.runtimeWithEvents().dispatchEvent?.(`${key}.paddle.${direction}.singlePress`);
+          const runtimeEvent = `${key}.paddle.${direction}.singlePress`;
+          this.runtimeWithEvents().dispatchEvent?.(runtimeEvent);
+          dispatchedEvent ??= runtimeEvent;
         }
       }
     }
+    this.runtime?.logMatter?.({
+      at: Date.now(),
+      direction: "received",
+      kind: "event",
+      subject,
+      key: matches[0]?.[0],
+      value: event,
+      nodeId,
+      endpoint: Number.isFinite(endpoint) ? endpoint : undefined,
+      clusterId: Number.isFinite(clusterId) ? clusterId : undefined,
+      eventId: Number.isFinite(eventId) ? eventId : undefined,
+      eventName: typeof eventName === "string" ? eventName : undefined,
+      event: dispatchedEvent,
+    });
   }
 
   private shouldDispatchButtonPress(
@@ -516,6 +602,75 @@ export class MatterProvider implements ProviderAdapter {
     this.staleProbeTimer.unref?.();
   }
 
+  private startRemoteKeepaliveLoop() {
+    const enabled = process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "0" && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "false";
+    if (!enabled || this.remoteKeepaliveTimer) {
+      return;
+    }
+    const intervalMs = Math.max(5000, Number(process.env.MATTER_REMOTE_KEEPALIVE_INTERVAL_SEC ?? "60") * 1000);
+    this.remoteKeepaliveTimer = setInterval(() => {
+      void this.pingRemoteTargets();
+    }, intervalMs);
+    this.remoteKeepaliveTimer.unref?.();
+  }
+
+  private async pingRemoteTargets() {
+    if (this.options.dryRun || !this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    if (this.remoteKeepaliveRunning) {
+      return;
+    }
+    this.remoteKeepaliveRunning = true;
+    try {
+      await this.pingRemoteTargetsOnce();
+    } finally {
+      this.remoteKeepaliveRunning = false;
+    }
+  }
+
+  private async pingRemoteTargetsOnce() {
+    const targets = this.remoteKeepaliveTargets();
+    if (targets.length === 0) {
+      return;
+    }
+    const maxPerPass = Math.max(1, Number(process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS ?? "2"));
+    const minIntervalMs = Math.max(5000, Number(process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC ?? "120") * 1000);
+    const now = Date.now();
+    let pinged = 0;
+    const visitedNodes = new Set<number>();
+    for (let offset = 0; offset < targets.length && pinged < maxPerPass; offset += 1) {
+      const index = (this.remoteKeepaliveCursor + offset) % targets.length;
+      const target = targets[index];
+      const nodeId = this.nodeByKey.get(target);
+      if (!nodeId || visitedNodes.has(nodeId) || this.probingTargets.has(target)) {
+        continue;
+      }
+      visitedNodes.add(nodeId);
+      const lastNodePingAt = this.lastPingByNode.get(nodeId);
+      if (lastNodePingAt !== undefined && now - lastNodePingAt < minIntervalMs) {
+        continue;
+      }
+      this.probingTargets.add(target);
+      try {
+        await this.pingTarget(target);
+        pinged += 1;
+      } catch {
+        pinged += 1;
+      } finally {
+        this.probingTargets.delete(target);
+      }
+    }
+    this.remoteKeepaliveCursor = (this.remoteKeepaliveCursor + Math.max(1, pinged)) % targets.length;
+  }
+
+  private remoteKeepaliveTargets() {
+    return [...this.targets.values()]
+      .filter((target) => target.capabilities?.remoteKeepalive === true)
+      .map((target) => target.target)
+      .filter((target) => this.nodeByKey.has(target));
+  }
+
   private async probeStaleTargets() {
     if (this.options.dryRun || !this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
@@ -532,51 +687,64 @@ export class MatterProvider implements ProviderAdapter {
   }
 
   private async probeStaleTargetsOnce() {
-    const availableStaleAfterMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_AFTER_SEC ?? "120") * 1000);
+    const availableStaleAfterMs = Math.max(1000, Number(process.env.MATTER_STALE_PROBE_AFTER_SEC ?? "60") * 1000);
     const unavailableStaleAfterMs = Math.max(
       availableStaleAfterMs,
       Number(process.env.MATTER_STALE_PROBE_UNAVAILABLE_AFTER_SEC ?? "300") * 1000,
     );
-    const maxPerPass = Math.max(1, Number(process.env.MATTER_STALE_PROBE_MAX_PER_PASS ?? "1"));
+    const maxPerPass = Math.max(1, Number(process.env.MATTER_STALE_PROBE_MAX_PER_PASS ?? "64"));
     const now = Date.now();
-    let pinged = 0;
-    for (const target of this.targets.keys()) {
-      if (pinged >= maxPerPass) {
+    let probed = 0;
+    const visitedNodes = new Set<number>();
+    for (const target of this.threadSourceProbeTargets()) {
+      if (probed >= maxPerPass) {
         break;
       }
       const nodeId = this.nodeByKey.get(target) ?? this.nodeByKey.get(parentTarget(target));
-      if (!nodeId || this.probingTargets.has(target)) {
+      if (!nodeId || visitedNodes.has(nodeId) || this.probingTargets.has(target)) {
         continue;
       }
+      visitedNodes.add(nodeId);
       const staleAfterMs = this.availableByNode.get(nodeId) === true ? availableStaleAfterMs : unavailableStaleAfterMs;
       const sourceStats = this.sourceStatsForTarget(target, nodeId);
       if (!sourceStats.hasSources) {
         continue;
       }
       const lastUpdateAt = sourceStats.lastUpdateAt;
-      const lastProbeAt = this.lastProbeByTarget.get(target);
-      const lastNodeProbeAt = this.lastProbeByNode.get(nodeId);
+      const lastProbeAt = this.lastSourceProbeByNode.get(nodeId) ?? this.lastProbeByTarget.get(target);
       if ((lastUpdateAt ?? this.staleProbeStartedAt) > now - staleAfterMs) {
         continue;
       }
       if (lastProbeAt !== undefined && now - lastProbeAt < staleAfterMs) {
         continue;
       }
-      if (lastNodeProbeAt !== undefined && now - lastNodeProbeAt < staleAfterMs) {
-        continue;
-      }
       this.probingTargets.add(target);
-      this.lastProbeByNode.set(nodeId, now);
+      this.lastSourceProbeByNode.set(nodeId, now);
       try {
-        await this.pingTarget(target);
-        pinged += 1;
+        await this.probeTarget(target);
+        probed += 1;
       } catch {
-        // Stale pings are opportunistic; availability is updated by pingTarget.
-        pinged += 1;
+        // Stale probes are opportunistic; availability is updated by probeTarget.
+        probed += 1;
       } finally {
         this.probingTargets.delete(target);
       }
     }
+  }
+
+  private threadSourceProbeTargets() {
+    const byNode = new Map<number, string>();
+    for (const binding of this.sources) {
+      if (binding.provider !== "matter" || !binding.path) {
+        continue;
+      }
+      const nodeId = this.nodeByKey.get(binding.key) ?? this.nodeByKey.get(parentTarget(binding.key));
+      if (!nodeId || !this.rssiByNode.has(nodeId) || byNode.has(nodeId)) {
+        continue;
+      }
+      byNode.set(nodeId, binding.key);
+    }
+    return [...byNode.values()];
   }
 
   private sourceStatsForTarget(target: string, nodeId: number) {

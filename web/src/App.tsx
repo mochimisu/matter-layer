@@ -9,17 +9,20 @@ import {
   UserRound,
   UserRoundCheck,
 } from "lucide-react";
+import { epaperDisplays, type EpaperDisplayDefinition, type EpaperStatDefinition } from "../../src/displays";
 import { buildFlowLanes, layoutFlowLanes, type FlowNodeModel } from "./flowGraph";
 import { applySnapshotDelta, type LiveMessage, type Snapshot } from "./snapshotDeltas";
 import "./style.css";
 
-type AppTab = "devices" | "details" | "graph" | "log";
+type AppTab = "devices" | "details" | "graph" | "log" | "epaper";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
 type DeviceStatus = { label: string; tone?: string; icon?: ReactNode; since?: number };
+const epaperStatValueCache = new Map<string, { value: string; updatedAt: number }>();
+const epaperPreviewRenderCache = new Map<string, { fingerprint: string; generatedAt: number }>();
 
 function tabFromLocation(): AppTab {
   const tab = new URLSearchParams(location.search).get("tab");
-  return tab === "graph" || tab === "details" || tab === "log" ? tab : "devices";
+  return tab === "graph" || tab === "details" || tab === "log" || tab === "epaper" ? tab : "devices";
 }
 
 function roomFromLocation() {
@@ -309,6 +312,7 @@ function App() {
     { id: "details" as const, label: "Details", title: "Details" },
     { id: "graph" as const, label: "Graph", title: "Graph" },
     { id: "log" as const, label: "Log", title: "Matter Log" },
+    { id: "epaper" as const, label: "E-Paper", title: "E-Paper Preview" },
   ];
 
   return (
@@ -520,6 +524,8 @@ function App() {
               onSelectDevice={selectLogDevice}
               onSelectAutomation={selectLogAutomation}
             />
+          ) : tab === "epaper" ? (
+            <EpaperPreview snapshot={snapshot} now={now} />
           ) : (
             <GraphView snapshot={visibleSnapshot} pageVisible={pageVisible} />
           )}
@@ -1137,6 +1143,751 @@ function LogView({
   );
 }
 
+function EpaperPreview({ snapshot, now }: { snapshot: Snapshot | null; now: number }) {
+  return (
+    <section className="gaia-panel epaper-preview-panel">
+      <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
+        <h2 className="gaia-title">E-Paper Preview</h2>
+        <span className="gaia-chip">800x480 mono</span>
+      </div>
+      <div className="epaper-preview-stage">
+        {epaperDisplays.map((display) => (
+          <div key={display.id} className="epaper-preview-item">
+            <div className="epaper-preview-label">
+              <span>{display.title ?? humanRoomName(display.room)}</span>
+              <code>/api/epaper/{display.id}.png</code>
+            </div>
+            <RoomEpaperImage snapshot={snapshot} now={now} display={display} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null; now: number; display: EpaperDisplayDefinition }) {
+  const renderNow = floorToMinute(now);
+  const room = display.room;
+  const roomSnapshot = filterSnapshot(snapshot, room);
+  const sourceById = new Map((roomSnapshot?.sources ?? []).map((source) => [source.source, source]));
+  const layerByTarget = new Map((roomSnapshot?.layers ?? []).map((layer) => [layer.target, layer]));
+  const targetById = new Map((roomSnapshot?.targets ?? []).map((target) => [target.target, target]));
+  const matter = snapshot?.providers.find((provider) => provider.name === "matter");
+  const bindingByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
+  const devices = visibleDeviceTargets(roomSnapshot?.targets ?? [])
+    .map((target) => {
+      const layer = layerByTarget.get(target.target);
+      const status = deviceStatus(target, sourceById, layer);
+      const binding = bindingByKey.get(target.key) ?? bindingByKey.get(target.target);
+      const health = matterHealth(matter, binding);
+      return {
+        target,
+        label: truncateMiddle(deviceDisplayLabel(binding?.label ?? target.key, target, room), 22),
+        status: status?.label ?? health.label,
+        tone: status?.tone ?? health.tone,
+        online: health.tone !== "bad",
+        icon: epaperDeviceIconKind(target, status?.label),
+        layer: layer?.surfaced?.layer,
+        detail: layer?.surfaced?.layer ?? "",
+      };
+    });
+  const compactDevices = devices.length > 7;
+  const onlineDevices = compactDevices
+    ? devices.filter((device) => device.online).slice(0, 10)
+    : devices.filter((device) => device.online).slice(0, devices.some((device) => !device.online) ? 5 : 7);
+  const offlineDevices = compactDevices
+    ? devices.filter((device) => !device.online).slice(0, 3)
+    : devices.filter((device) => !device.online).slice(0, 2);
+  const deviceRowStep = compactDevices ? 25 : 47;
+  const offlineHeaderY = 100 + onlineDevices.length * deviceRowStep + (compactDevices ? 15 : 18);
+  const rules = roomSnapshot?.rules ?? [];
+  const eventActions = roomSnapshot?.eventActions ?? [];
+  const signalById = new Map((snapshot?.signals ?? []).map((signal) => [signal.id, signal]));
+  const activeFlowSources = new Set<string>();
+  const activeFlowSinks = new Set<string>();
+  const automations = [
+    ...rules.map((rule) => {
+      const deps = uniqueLimited(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)), 8);
+      const outputs = epaperVisibleFlowOutputs(rule.outputs?.length ? rule.outputs : inferEpaperRuleOutputs(rule.name, roomSnapshot?.layers ?? []), targetById);
+      for (const dep of deps) {
+        if (epaperSourceActive(sourceById.get(dep)?.value ?? signalById.get(dep)?.value)) activeFlowSources.add(epaperFlowLabel(dep, room, 48));
+      }
+      for (const output of outputs) {
+        if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, room, 48));
+      }
+      return {
+        name: rule.name,
+        enabled: rule.enabled,
+        deps: deps.map((dep) => epaperFlowLabel(dep, room, 48)),
+        outputs: outputs.map((output) => epaperFlowLabel(output, room, 48)),
+        lastRunAt: rule.lastRunAt,
+      };
+    }),
+    ...eventActions.map((action) => {
+      if (action.lastRunAt && renderNow - action.lastRunAt <= 5 * 60 * 1000) activeFlowSources.add(epaperFlowLabel(action.event, room, 48));
+      const outputs = epaperVisibleFlowOutputs(action.outputs, targetById);
+      for (const output of outputs) {
+        if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, room, 48));
+      }
+      return {
+        name: action.name,
+        enabled: true,
+        deps: [epaperFlowLabel(action.event, room, 48)],
+        outputs: outputs.map((output) => epaperFlowLabel(output, room, 48)),
+        lastRunAt: action.lastRunAt,
+      };
+    }),
+  ].filter((automation) => automation.outputs.length > 0).slice(0, 6);
+  const statCards = epaperStats(snapshot, display.stats ?? [], renderNow);
+  const flowY = statCards.length ? 142 : 100;
+  const epaperFlow = buildEpaperFlow(automations, activeFlowSources, activeFlowSinks, flowY);
+  const generatedAt = epaperPreviewGeneratedAt(display.id, epaperPreviewFingerprint(snapshot, display, renderNow), renderNow);
+
+  return (
+    <>
+    <svg className="epaper-image" viewBox="0 0 800 480" role="img" aria-label="Office e-paper status preview">
+      <defs>
+        <pattern id="epaper-grid" width="20" height="20" patternUnits="userSpaceOnUse">
+          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#111" strokeOpacity="0.08" strokeWidth="1" />
+        </pattern>
+        <pattern id="epaper-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="6" stroke="#111" strokeOpacity="0.22" strokeWidth="2" />
+        </pattern>
+      </defs>
+      <rect width="800" height="480" fill="#fbfbf6" />
+      <rect width="800" height="480" fill="url(#epaper-grid)" />
+      <rect x="0" y="0" width="800" height="48" fill="#111" />
+      <text x="24" y="31" fill="#fff" fontFamily="Inter, Arial, sans-serif" fontSize="24" fontWeight="900">{(display.title ?? humanRoomName(room)).toUpperCase()}</text>
+
+      <text x="24" y="76" fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="14" fontWeight="900">DEVICES</text>
+      <text x="408" y="76" fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="14" fontWeight="900">DRIVES</text>
+      <line x1="24" y1="84" x2="386" y2="84" stroke="#111" strokeWidth="2" />
+      <line x1="408" y1="84" x2="776" y2="84" stroke="#111" strokeWidth="2" />
+      {statCards.length ? <EpaperStatCards stats={statCards} /> : null}
+
+      {onlineDevices.map((device, index) => compactDevices ? (
+        <EpaperCompactDeviceRow key={device.target.target} device={device} y={100 + index * deviceRowStep} />
+      ) : (
+        <EpaperDeviceRow key={device.target.target} device={device} y={100 + index * deviceRowStep} />
+      ))}
+      {offlineDevices.length ? (
+        <g>
+          <text x="24" y={offlineHeaderY} fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="12" fontWeight="900">OFFLINE</text>
+          <line x1="82" y1={offlineHeaderY - 4} x2="386" y2={offlineHeaderY - 4} stroke="#111" strokeWidth="1.5" />
+          {offlineDevices.map((device, index) => compactDevices ? (
+            <EpaperCompactDeviceRow key={device.target.target} device={device} y={offlineHeaderY + 8 + index * deviceRowStep} />
+          ) : (
+            <EpaperDeviceRow key={device.target.target} device={device} y={offlineHeaderY + 12 + index * deviceRowStep} />
+          ))}
+        </g>
+      ) : null}
+      {devices.length === 0 ? (
+        <text x="24" y="128" fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="15" fontWeight="700">No devices resolved.</text>
+      ) : null}
+
+      {epaperFlow.edges.length ? (
+        <EpaperFlowGraph flow={epaperFlow} />
+      ) : (
+        <text x="408" y={statCards.length ? 160 : 128} fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="15" fontWeight="700">No drives.</text>
+      )}
+    </svg>
+    <div className="epaper-generated-at">Generated at {formatEpaperTime(generatedAt)}</div>
+    </>
+  );
+}
+
+function EpaperCompactDeviceRow({
+  device,
+  y,
+}: {
+  device: {
+    label: string;
+    status: string;
+    tone?: string;
+    online: boolean;
+    icon: EpaperDeviceIconKind;
+    layer?: string;
+    detail: string;
+  };
+  y: number;
+}) {
+  const active = ["on", "open", "active", "opening", "closing"].includes(String(device.tone));
+  const layer = device.layer ?? "";
+  return (
+    <g>
+      <rect x="24" y={y} width="362" height="20" fill={active ? "#111" : "#fbfbf6"} stroke="#111" strokeWidth="1.5" />
+      <text x="36" y={y + 14} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="11" fontWeight="900">
+        {truncateText(device.label, 20)}
+      </text>
+      <text x="184" y={y + 14} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="9" fontWeight="900">
+        {layer ? `[${truncateText(layer, 18)}]` : ""}
+      </text>
+      <text x="374" y={y + 14} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="10" fontWeight="900" textAnchor="end">
+        {truncateText(device.status.toUpperCase(), 10)}
+      </text>
+    </g>
+  );
+}
+
+function EpaperDeviceRow({
+  device,
+  y,
+}: {
+  device: {
+    label: string;
+    status: string;
+    tone?: string;
+    online: boolean;
+    icon: EpaperDeviceIconKind;
+    layer?: string;
+    detail: string;
+  };
+  y: number;
+}) {
+  const active = ["on", "open", "active", "opening", "closing"].includes(String(device.tone));
+  return (
+    <g>
+      <rect x="24" y={y} width="362" height="38" fill={active ? "#111" : "#fbfbf6"} stroke="#111" strokeWidth="2" />
+      <rect x="24" y={y} width="9" height="38" fill={device.layer ? "#111" : "url(#epaper-hatch)"} />
+      <EpaperDeviceIcon kind={device.icon} x={43} y={y + 8} active={active} />
+      <text x="70" y={y + 16} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="14" fontWeight="900">
+        {device.label}
+      </text>
+      <text x="70" y={y + 31} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="10" fontWeight="900">
+        {truncateText(device.layer || "no active layer", 33)}
+      </text>
+      <text x="374" y={y + 17} fill={active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="12" fontWeight="900" textAnchor="end">
+        {truncateText(device.status.toUpperCase(), 11)}
+      </text>
+    </g>
+  );
+}
+
+type EpaperDeviceIconKind = "light" | "blind" | "presence" | "door" | "generic";
+
+function epaperDeviceIconKind(target: Snapshot["targets"][number], status?: string): EpaperDeviceIconKind {
+  const product = String(target.capabilities?.product ?? "").toLowerCase();
+  if (target.capabilities?.position || target.capabilities?.commands) return "blind";
+  if (target.capabilities?.power) return "light";
+  if (product.includes("presence")) return "presence";
+  if (status === "open" || status === "closed" || product.includes("door")) return "door";
+  return "generic";
+}
+
+function EpaperDeviceIcon({ kind, x, y, active }: { kind: EpaperDeviceIconKind; x: number; y: number; active: boolean }) {
+  const stroke = active ? "#fff" : "#111";
+  const fill = active ? "#111" : "#fbfbf6";
+  if (kind === "light") {
+    return (
+      <g stroke={stroke} fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d={`M ${x + 7} ${y + 4} a 6 6 0 0 1 4 10 c -1 1 -1.5 2 -1.5 3 h -5 c 0 -1 -0.5 -2 -1.5 -3 a 6 6 0 0 1 4 -10`} />
+        <path d={`M ${x + 4.5} ${y + 19} h 5`} />
+        <path d={`M ${x + 3} ${y + 2} l -2 -2 M ${x + 11} ${y + 2} l 2 -2 M ${x + 7} ${y} v -3`} />
+      </g>
+    );
+  }
+  if (kind === "blind") {
+    return (
+      <g stroke={stroke} fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x={x + 1} y={y + 2} width="16" height="16" rx="1.5" fill={fill} />
+        <path d={`M ${x + 1} ${y + 7} h 16 M ${x + 1} ${y + 11} h 16 M ${x + 1} ${y + 15} h 16`} />
+      </g>
+    );
+  }
+  if (kind === "presence") {
+    return (
+      <g stroke={stroke} fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx={x + 9} cy={y + 6} r="4" />
+        <path d={`M ${x + 2.5} ${y + 20} c 1.4 -5 11.6 -5 13 0`} />
+        <path d={`M ${x + 15} ${y + 3} l 3 3 l 5 -6`} />
+      </g>
+    );
+  }
+  if (kind === "door") {
+    return (
+      <g stroke={stroke} fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d={`M ${x + 4} ${y + 20} v -17 h 11 v 17`} />
+        <path d={`M ${x + 11} ${y + 11} h 1`} />
+      </g>
+    );
+  }
+  return (
+    <g stroke={stroke} fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x={x + 3} y={y + 3} width="14" height="14" rx="2" />
+      <path d={`M ${x + 7} ${y + 10} h 6 M ${x + 10} ${y + 7} v 6`} />
+    </g>
+  );
+}
+
+type EpaperFlowNode = {
+  id: string;
+  label: string;
+  title: string;
+  detail: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  active: boolean;
+};
+type EpaperFlowEdge = { id: string; from: EpaperFlowNode; to: EpaperFlowNode; laneX: number; sourceOffset: number; sinkOffset: number; enabled: boolean };
+type EpaperFlow = { sources: EpaperFlowNode[]; sinks: EpaperFlowNode[]; edges: EpaperFlowEdge[] };
+
+function EpaperFlowGraph({ flow }: { flow: EpaperFlow }) {
+  return (
+    <g>
+      {flow.edges.map((edge) => {
+        const fromY = edge.from.y + edge.from.h / 2 + edge.sourceOffset;
+        const toY = edge.to.y + edge.to.h / 2 + edge.sinkOffset;
+        return (
+          <g key={edge.id}>
+            <path
+              d={epaperCurvedPath(edge.from.x + edge.from.w, fromY, edge.laneX, edge.to.x, toY)}
+              fill="none"
+              stroke="#fbfbf6"
+              strokeWidth="6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d={epaperCurvedPath(edge.from.x + edge.from.w, fromY, edge.laneX, edge.to.x, toY)}
+              fill="none"
+              stroke="#111"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeDasharray={edge.enabled ? undefined : "5 4"}
+            />
+          </g>
+        );
+      })}
+      {[...flow.sources, ...flow.sinks].map((node) => (
+        <g key={node.id}>
+          <rect x={node.x} y={node.y} width={node.w} height={node.h} fill={node.active ? "#111" : "#fbfbf6"} stroke="#111" strokeWidth="2" />
+          <rect x={node.x} y={node.y} width="7" height={node.h} fill="#111" />
+          <text x={node.x + node.w / 2 + 4} y={node.y + 16} fill={node.active ? "#fff" : "#111"} fontFamily="Inter, Arial, sans-serif" fontSize="10" fontWeight="900" textAnchor="middle">
+            {node.title}
+          </text>
+        </g>
+      ))}
+    </g>
+  );
+}
+
+function EpaperStatCards({ stats }: { stats: Array<{ label: string; value: string }> }) {
+  return (
+    <g>
+      {stats.slice(0, 3).map((stat, index) => {
+        const x = 408 + index * 123;
+        return (
+          <g key={stat.label}>
+            <rect x={x} y="92" width="116" height="36" fill="#fbfbf6" stroke="#111" strokeWidth="2" />
+            <text x={x + 8} y="106" fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="8" fontWeight="900">
+              {stat.label.toUpperCase()}
+            </text>
+            <text x={x + 8} y="123" fill="#111" fontFamily="Inter, Arial, sans-serif" fontSize="19" fontWeight="900">
+              {stat.value}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+function buildEpaperFlow(
+  automations: Array<{ enabled: boolean; deps: string[]; outputs: string[] }>,
+  activeSources = new Set<string>(),
+  activeSinks = new Set<string>(),
+  yStart = 100,
+): EpaperFlow {
+  const sinkIds = uniqueLimited(automations.flatMap((automation) => automation.outputs), 6);
+  const sourceIds = prioritizedEpaperSourceIds(automations, sinkIds, 8);
+  const sourceGroups = groupEpaperSourceLabels(sourceIds, activeSources);
+  const sourceNodes = sourceGroups.map((group, index) => ({
+    id: `source:${group.key}`,
+    label: group.key,
+    title: group.title,
+    detail: group.detail,
+    x: 408,
+    y: yStart + index * 31,
+    w: 126,
+    h: 23,
+    active: group.active,
+  }));
+  const sinkNodes = sinkIds.map((label, index) => ({
+    id: `sink:${label}`,
+    label,
+    ...splitEpaperFlowNodeLabel(label),
+    x: 650,
+    y: yStart + index * 35,
+    w: 126,
+    h: 25,
+    active: activeSinks.has(label),
+  }));
+  const sourceByLabel = new Map(sourceGroups.flatMap((group, index) => group.labels.map((label) => [label, sourceNodes[index]] as const)));
+  const sinkByLabel = new Map(sinkNodes.map((node) => [node.label, node]));
+  const rawEdges = automations.flatMap((automation) =>
+    automation.deps.flatMap((dep) =>
+      automation.outputs.map((output) => ({
+        sourceLabel: dep,
+        sinkLabel: output,
+        enabled: automation.enabled,
+      })),
+    ),
+  );
+  const deduped = prioritizeEpaperEdges(uniqueEdges(rawEdges), sinkIds, 14);
+  const resolvedEdges = uniqueResolvedEpaperEdges(deduped.flatMap((edge) => {
+    const from = sourceByLabel.get(edge.sourceLabel);
+    const to = sinkByLabel.get(edge.sinkLabel);
+    if (!from || !to) return [];
+    return [{ ...edge, from, to }];
+  }));
+  return {
+    sources: sourceNodes,
+    sinks: sinkNodes,
+    edges: resolvedEdges.map((edge, index) => ({
+        id: `${edge.sourceLabel}:${edge.sinkLabel}:${index}`,
+        from: edge.from,
+        to: edge.to,
+        laneX: 552 + (index % 7) * 5,
+        sourceOffset: portOffset(indexForResolvedEdgeNode(resolvedEdges, edge.from.id, "from", index), countResolvedEdgesForNode(resolvedEdges, edge.from.id, "from")),
+        sinkOffset: portOffset(indexForResolvedEdgeNode(resolvedEdges, edge.to.id, "to", index), countResolvedEdgesForNode(resolvedEdges, edge.to.id, "to")),
+        enabled: edge.enabled,
+    })),
+  };
+}
+
+function prioritizeEpaperEdges(edges: Array<{ sourceLabel: string; sinkLabel: string; enabled: boolean }>, sinkIds: string[], limit: number) {
+  const prioritized: Array<{ sourceLabel: string; sinkLabel: string; enabled: boolean }> = [];
+  const edgesBySink = sinkIds.map((sink) => edges.filter((edge) => edge.sinkLabel === sink));
+  for (let index = 0; index < limit; index += 1) {
+    for (const sinkEdges of edgesBySink) {
+      const edge = sinkEdges[index];
+      if (edge) prioritized.push(edge);
+    }
+  }
+  return uniqueEdges([...prioritized, ...edges]).slice(0, limit);
+}
+
+function epaperSourceActive(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return !["", "off", "closed", "clear", "idle", "false", "unknown", "unavailable"].includes(value.toLowerCase());
+  return false;
+}
+
+function expandEpaperSourceDeps(dep: string, signalById: Map<string, Snapshot["signals"][number]>, seen = new Set<string>()): string[] {
+  if (dep === "time.tick" || seen.has(dep)) return [];
+  const signal = signalById.get(dep);
+  if (!signal) return dep.startsWith("signal.") ? [] : [dep];
+  seen.add(dep);
+  return signal.deps.flatMap((signalDep) => expandEpaperSourceDeps(signalDep, signalById, seen));
+}
+
+function inferEpaperRuleOutputs(ruleName: string, layers: Snapshot["layers"]) {
+  const matched = layers.flatMap((layer) => {
+    const surfaced = layer.surfaced;
+    if (!surfaced) return [];
+    const output = surfaced.output as { reason?: unknown; writer?: unknown };
+    return output.reason === ruleName || output.writer === ruleName ? [layer.target] : [];
+  });
+  if (matched.length) return matched;
+  return layers.flatMap((layer) => layer.surfaced?.layer === "automation" ? [layer.target] : []);
+}
+
+function epaperVisibleFlowOutputs(outputs: string[], targetById: Map<string, Snapshot["targets"][number]>) {
+  return outputs.filter((output) => {
+    const epaper = targetById.get(output)?.capabilities?.epaper as { excludeFromFlow?: unknown } | undefined;
+    return epaper?.excludeFromFlow !== true;
+  });
+}
+
+function epaperOutputActive(state: unknown) {
+  if (state == null) return false;
+  if (typeof state === "boolean") return state;
+  if (typeof state !== "object") return epaperSourceActive(state);
+  const data = state as Record<string, unknown>;
+  if ("power" in data) return data.power === "on" || data.power === true;
+  if ("position" in data) return data.position === "open" || typeof data.position === "number" && data.position < 95;
+  if ("motion" in data) return data.motion !== "stop";
+  return false;
+}
+
+function prioritizedEpaperSourceIds(automations: Array<{ deps: string[]; outputs: string[] }>, sinkIds: string[], limit: number) {
+  const prioritized: string[] = [];
+  const depsBySink = sinkIds.map((sink) => uniqueLimited(
+    [...automations.filter((automation) => automation.outputs.includes(sink)).flatMap((automation) => automation.deps)]
+      .sort(compareEpaperSourcePriority),
+    limit,
+  ));
+  for (let index = 0; index < limit; index += 1) {
+    for (const deps of depsBySink) {
+      const dep = deps[index];
+      if (dep) prioritized.push(dep);
+    }
+  }
+  return uniqueLimited([...prioritized, ...automations.flatMap((automation) => automation.deps)], limit);
+}
+
+function compareEpaperSourcePriority(left: string, right: string) {
+  return epaperSourcePriority(left) - epaperSourcePriority(right);
+}
+
+function epaperSourcePriority(label: string) {
+  const lower = label.toLowerCase();
+  if (lower.includes(".paddle.") || lower.includes(".button.")) return 0;
+  if (lower.endsWith(".activelayer")) return 1;
+  return 2;
+}
+
+function groupEpaperSourceLabels(labels: string[], activeSources: Set<string>) {
+  const groups = new Map<string, { key: string; labels: string[]; title: string; detailParts: string[]; active: boolean }>();
+  for (const label of labels) {
+    const split = splitEpaperFlowNodeLabel(label);
+    const rawDetail = epaperFlowNodeRawDetail(label);
+    const shouldGroup = split.title.toLowerCase().startsWith("presence") || rawDetail === "activeLayer" || isEpaperEventSourceDetail(rawDetail);
+    const key = shouldGroup ? `source:${split.title}` : label;
+    const group = groups.get(key) ?? { key, labels: [], title: split.title, detailParts: [], active: false };
+    group.labels.push(label);
+    group.active ||= activeSources.has(label);
+    const groupedDetail = epaperGroupedSourceDetail(rawDetail);
+    if (groupedDetail) group.detailParts.push(groupedDetail);
+    else if (split.detail) group.detailParts.push(split.detail);
+    else if (shouldGroup && rawDetail && !isRedundantEpaperNodeDetail(split.title, rawDetail)) group.detailParts.push(rawDetail);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => ({
+    key: group.key,
+    labels: group.labels,
+    title: group.title,
+    detail: truncateMiddle([...new Set(group.detailParts)].join(" / "), 26),
+    active: group.active,
+  }));
+}
+
+function epaperFlowNodeRawDetail(label: string) {
+  const [, ...rest] = label.split(".");
+  return rest.join(".");
+}
+
+function isEpaperEventSourceDetail(detail: string) {
+  return detail.startsWith("paddle.") || detail.startsWith("button.");
+}
+
+function epaperGroupedSourceDetail(detail: string) {
+  const parts = detail.split(".");
+  if (parts[0] === "paddle" && parts[1]) return `paddle ${parts[1]}`;
+  if (parts[0] === "button" && parts[1]) return `button ${parts[1]}`;
+  return "";
+}
+
+function splitEpaperFlowNodeLabel(label: string) {
+  const [first, ...rest] = label.split(".");
+  if (!rest.length) {
+    return {
+      title: truncateMiddle(label, 16),
+      detail: "",
+    };
+  }
+  const detail = rest.join(".");
+  if (isRedundantEpaperNodeDetail(first, detail)) {
+    return {
+      title: truncateMiddle(first || label, 16),
+      detail: "",
+    };
+  }
+  return {
+    title: truncateMiddle(first || label, 14),
+    detail: truncateMiddle(detail, 26),
+  };
+}
+
+function isRedundantEpaperNodeDetail(title: string, detail: string) {
+  const normalizedTitle = title.toLowerCase();
+  const normalizedDetail = detail.toLowerCase();
+  if (normalizedTitle === normalizedDetail) return true;
+  return normalizedDetail === "presence" && normalizedTitle.startsWith("presence");
+}
+
+function epaperCurvedPath(sourceX: number, sourceY: number, laneX: number, targetX: number, targetY: number) {
+  const direction = targetY >= sourceY ? 1 : -1;
+  const verticalGap = Math.abs(targetY - sourceY);
+  const horizontalIn = Math.max(0, laneX - sourceX);
+  const horizontalOut = Math.max(0, targetX - laneX);
+  const c2 = Math.max(2, Math.min(18, horizontalIn / 2, verticalGap / 2));
+  const c1 = Math.max(2, Math.min(18, horizontalOut / 2, verticalGap / 2));
+  if (verticalGap < 4 || c1 < 3 || c2 < 3) return `M ${sourceX} ${sourceY} L ${laneX} ${sourceY} L ${laneX} ${targetY} L ${targetX} ${targetY}`;
+  const sourceSweep = direction > 0 ? 1 : 0;
+  const targetSweep = direction > 0 ? 0 : 1;
+  return [
+    `M ${sourceX} ${sourceY}`,
+    `L ${laneX - c2} ${sourceY}`,
+    `A ${c2} ${c2} 90 0 ${sourceSweep} ${laneX} ${sourceY + direction * c2}`,
+    `L ${laneX} ${targetY - direction * c1}`,
+    `A ${c1} ${c1} 90 0 ${targetSweep} ${laneX + c1} ${targetY}`,
+    `L ${targetX} ${targetY}`,
+  ].join(" ");
+}
+
+function uniqueLimited(values: string[], limit: number) {
+  return [...new Set(values.filter(Boolean))].slice(0, limit);
+}
+
+function uniqueEdges(edges: Array<{ sourceLabel: string; sinkLabel: string; enabled: boolean }>) {
+  const seen = new Map<string, { sourceLabel: string; sinkLabel: string; enabled: boolean }>();
+  for (const edge of edges) {
+    const key = `${edge.sourceLabel}->${edge.sinkLabel}`;
+    const existing = seen.get(key);
+    seen.set(key, { ...edge, enabled: edge.enabled || Boolean(existing?.enabled) });
+  }
+  return [...seen.values()];
+}
+
+function uniqueResolvedEpaperEdges(edges: Array<{ sourceLabel: string; sinkLabel: string; enabled: boolean; from: EpaperFlowNode; to: EpaperFlowNode }>) {
+  const seen = new Map<string, { sourceLabel: string; sinkLabel: string; enabled: boolean; from: EpaperFlowNode; to: EpaperFlowNode }>();
+  for (const edge of edges) {
+    const key = `${edge.from.id}->${edge.to.id}`;
+    const existing = seen.get(key);
+    seen.set(key, { ...edge, enabled: edge.enabled || Boolean(existing?.enabled) });
+  }
+  return [...seen.values()];
+}
+
+function countResolvedEdgesForNode(edges: Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>, nodeId: string, key: "from" | "to") {
+  return edges.filter((edge) => edge[key].id === nodeId).length;
+}
+
+function indexForResolvedEdgeNode(edges: Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>, nodeId: string, key: "from" | "to", edgeIndex: number) {
+  return edges.slice(0, edgeIndex + 1).filter((edge) => edge[key].id === nodeId).length - 1;
+}
+
+function countEdgesForLabel(edges: Array<{ sourceLabel: string; sinkLabel: string }>, label: string, key: "sourceLabel" | "sinkLabel") {
+  return edges.filter((edge) => edge[key] === label).length;
+}
+
+function indexForEdgeLabel(edges: Array<{ sourceLabel: string; sinkLabel: string }>, label: string, key: "sourceLabel" | "sinkLabel", edgeIndex: number) {
+  return edges.slice(0, edgeIndex + 1).filter((edge) => edge[key] === label).length - 1;
+}
+
+function portOffset(index: number, total: number) {
+  if (total <= 1) return 0;
+  return (index - (total - 1) / 2) * 4;
+}
+
+function epaperStats(snapshot: Snapshot | null, stats: EpaperStatDefinition[], now: number) {
+  const sourceById = new Map((snapshot?.sources ?? []).map((source) => [source.source, source]));
+  const signalById = new Map((snapshot?.signals ?? []).map((signal) => [signal.id, signal]));
+  return stats.map((stat) => {
+    const value = formatEpaperStatValue(stat, stat.source ? sourceById.get(stat.source)?.value : signalById.get(stat.signal ?? "")?.value);
+    return {
+      label: stat.label,
+      value: throttledEpaperStatValue(stat, value, now),
+    };
+  });
+}
+
+function epaperPreviewGeneratedAt(displayId: string, fingerprint: string, now: number) {
+  const cached = epaperPreviewRenderCache.get(displayId);
+  if (cached?.fingerprint === fingerprint) return cached.generatedAt;
+  epaperPreviewRenderCache.set(displayId, { fingerprint, generatedAt: now });
+  return now;
+}
+
+function epaperPreviewFingerprint(snapshot: Snapshot | null, display: EpaperDisplayDefinition, now: number) {
+  const roomSnapshot = filterSnapshot(snapshot, display.room);
+  const sourceById = new Map((roomSnapshot?.sources ?? []).map((source) => [source.source, source]));
+  const signalById = new Map((snapshot?.signals ?? []).map((signal) => [signal.id, signal]));
+  const layerByTarget = new Map((roomSnapshot?.layers ?? []).map((layer) => [layer.target, layer]));
+  const matter = snapshot?.providers.find((provider) => provider.name === "matter");
+  const bindingByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
+  return stableStringify({
+    display: display.id,
+    stats: epaperStats(snapshot, display.stats ?? [], now),
+    devices: visibleDeviceTargets(roomSnapshot?.targets ?? []).map((target) => {
+      const layer = layerByTarget.get(target.target);
+      const binding = bindingByKey.get(target.key) ?? bindingByKey.get(target.target);
+      return {
+        target: target.target,
+        key: target.key,
+        label: binding?.label ?? target.key,
+        available: binding?.available,
+        statusSources: epaperStatusSourceIds(target).map((source) => [source, sourceById.get(source)?.value]),
+        status: layer?.surfaced?.output.state,
+        layer: layer?.surfaced?.layer,
+      };
+    }),
+    rules: (roomSnapshot?.rules ?? []).map((rule) => ({
+      name: rule.name,
+      enabled: rule.enabled,
+      deps: rule.deps,
+      outputs: rule.outputs,
+      depValues: rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)).map((dep) => [dep, sourceById.get(dep)?.value ?? signalById.get(dep)?.value]),
+    })),
+    events: (roomSnapshot?.eventActions ?? []).map((action) => ({
+      name: action.name,
+      event: action.event,
+      outputs: action.outputs,
+      active: Boolean(action.lastRunAt && now - action.lastRunAt <= 5 * 60 * 1000),
+    })),
+    signals: (roomSnapshot?.signals ?? []).map((signal) => ({
+      id: signal.id,
+      value: signal.value,
+      deps: signal.deps,
+    })),
+    layers: (roomSnapshot?.layers ?? []).map((layer) => ({
+      target: layer.target,
+      surfaced: layer.surfaced
+        ? {
+            layer: layer.surfaced.layer,
+            state: layer.surfaced.output.state,
+            reason: layer.surfaced.output.reason,
+          }
+        : undefined,
+    })),
+  });
+}
+
+function epaperStatusSourceIds(target: Snapshot["targets"][number]) {
+  return [
+    target.display?.status?.source,
+    `${target.key}.status`,
+    `${target.key}.power`,
+    `${target.key}.displayStatus`,
+    `${target.key}.presence`,
+    `${target.key}.open`,
+    `${target.key}.position`,
+  ].filter((source): source is string => Boolean(source));
+}
+
+function formatEpaperStatValue(stat: EpaperStatDefinition, value: unknown) {
+  if (stat.format === "day-night") return typeof value === "boolean" ? (value ? "DAY" : "NIGHT") : "--";
+  if (typeof value !== "number") return "--";
+  const formatted = stat.format === "integer" ? String(Math.round(value)) : String(value);
+  return `${formatted}${stat.unit ?? ""}`;
+}
+
+function throttledEpaperStatValue(stat: EpaperStatDefinition, value: string, now: number) {
+  if (!stat.minUpdateMs) return value;
+  const key = stat.source ?? stat.signal ?? stat.label;
+  const cached = epaperStatValueCache.get(key);
+  if (!cached || now - cached.updatedAt >= stat.minUpdateMs) {
+    epaperStatValueCache.set(key, { value, updatedAt: now });
+    return value;
+  }
+  return cached.value;
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(sortStable(value));
+}
+
+function sortStable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortStable);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, sortStable(item)]));
+}
+
 function groupTargetsByRoom(targets: Snapshot["targets"]) {
   const grouped = new Map<string, Snapshot["targets"]>();
   for (const target of visibleDeviceTargets(targets)) {
@@ -1274,6 +2025,10 @@ function remoteActions(
 
 function deviceDisplayLabel(label: string, target: Snapshot["targets"][number], room: string) {
   return stripRoomPrefix(label, room) || stripRoomPrefix(target.key, room) || label;
+}
+
+function epaperFlowLabel(id: string, room: string, length: number) {
+  return truncateMiddle(stripRoomPrefix(id, room), length);
 }
 
 function stripRoomPrefix(value: string, room: string) {
@@ -1560,7 +2315,12 @@ function filterSnapshot(snapshot: Snapshot | null, room: string): Snapshot | nul
   const layers = snapshot.layers.filter((layer) => inRoom(layer.target));
   const events = snapshot.events.filter(inRoom);
   const eventActions = (snapshot.eventActions ?? []).filter((action) => inRoom(action.name));
-  const matterLog = (snapshot.matterLog ?? []).filter((entry) => inRoom(entry.subject) || (entry.key ? inRoom(entry.key) : false) || (entry.reason ? inRoom(entry.reason) : false));
+  const matterLog = (snapshot.matterLog ?? []).filter((entry) => (
+    inRoom(entry.subject) ||
+    (entry.key ? inRoom(entry.key) : false) ||
+    (entry.event ? inRoom(entry.event) : false) ||
+    (entry.reason ? inRoom(entry.reason) : false)
+  ));
   return {
     ...snapshot,
     sources,
@@ -1593,11 +2353,17 @@ function filterSnapshotByLogFilters(snapshot: Snapshot | null, deviceFilter: str
       entry.reason === automationFilter ||
       deps.has(entry.subject) ||
       outputs.has(entry.subject) ||
-      (entry.key ? deps.has(entry.key) || outputs.has(entry.key) : false)
+      (entry.key ? deps.has(entry.key) || outputs.has(entry.key) : false) ||
+      (entry.event ? deps.has(entry.event) || outputs.has(entry.event) : false)
     );
   };
   const matterLog = (snapshot.matterLog ?? []).filter((entry) => {
-    const deviceMatches = deviceFilter === "all" || matchesDevice(entry.subject) || (entry.key ? matchesDevice(entry.key) : false);
+    const deviceMatches = (
+      deviceFilter === "all" ||
+      matchesDevice(entry.subject) ||
+      (entry.key ? matchesDevice(entry.key) : false) ||
+      (entry.event ? matchesDevice(entry.event) : false)
+    );
     return deviceMatches && matchesAutomation(entry);
   });
   return { ...snapshot, matterLog };
@@ -1766,8 +2532,15 @@ function LayerBadge({ layer }: { layer?: string }) {
   return <span className={`gaia-chip ${color}`}>{layer}</span>;
 }
 
-function formatRunTime(value?: number) {
+function formatRunTime(value?: number, minuteOnly = false) {
   if (!value) return "never";
+  if (minuteOnly) {
+    const minutes = Math.max(0, Math.floor((floorToMinute(Date.now()) - floorToMinute(value)) / 60_000));
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
   const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
   if (seconds < 5) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
@@ -1791,6 +2564,32 @@ function matterLogDetail(entry: NonNullable<Snapshot["matterLog"]>[number]) {
     const parts = [entry.reason, entry.state ? formatValue(entry.state) : undefined, entry.error].filter(Boolean);
     return parts.join(" · ") || "command";
   }
+  if (entry.kind === "ping") {
+    const parts = [
+      entry.ok === false ? "failed" : "ok",
+      entry.elapsedMs !== undefined ? `${Math.round(entry.elapsedMs)}ms` : undefined,
+      entry.error,
+    ].filter(Boolean);
+    return parts.join(" · ");
+  }
+  if (entry.kind === "probe") {
+    const reads = Array.isArray(entry.value) ? `${entry.value.length} reads` : undefined;
+    const parts = [
+      entry.ok === false ? "failed" : "ok",
+      reads,
+      entry.elapsedMs !== undefined ? `${Math.round(entry.elapsedMs)}ms` : undefined,
+      entry.error,
+    ].filter(Boolean);
+    return parts.join(" · ");
+  }
+  if (entry.kind === "event") {
+    const parts = [
+      entry.eventName ?? (entry.eventId !== undefined ? `event ${entry.eventId}` : "event"),
+      entry.endpoint !== undefined ? `ep ${entry.endpoint}` : undefined,
+      entry.event ?? "no rule event",
+    ].filter(Boolean);
+    return parts.join(" · ");
+  }
   const source = entry.property ? `${entry.key ?? entry.subject}.${entry.property}` : entry.key ?? entry.subject;
   return `${source} = ${formatValue(entry.value)}`;
 }
@@ -1799,6 +2598,29 @@ function formatValue(value: unknown) {
   if (value === undefined) return "unknown";
   if (typeof value === "string") return value;
   return JSON.stringify(value);
+}
+
+function formatEpaperTime(value: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(floorToMinute(value));
+}
+
+function floorToMinute(value: number) {
+  return Math.floor(value / 60_000) * 60_000;
+}
+
+function truncateText(value: string, length: number) {
+  if (value.length <= length) return value;
+  return `${value.slice(0, Math.max(0, length - 1))}...`;
+}
+
+function truncateMiddle(value: string, length: number) {
+  if (value.length <= length) return value;
+  const keep = Math.max(2, Math.floor((length - 3) / 2));
+  return `${value.slice(0, keep)}...${value.slice(-keep)}`;
 }
 
 function shortDependency(

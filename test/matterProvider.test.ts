@@ -187,6 +187,7 @@ describe("MatterProvider command translation", () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
     const events: string[] = [];
+    const logs: any[] = [];
     internals.targets.set("room.remote", {
       target: "room.remote",
       capabilities: {
@@ -203,12 +204,26 @@ describe("MatterProvider command translation", () => {
       dispatchEvent(event: string) {
         events.push(event);
       },
+      logMatter(entry: any) {
+        logs.push(entry);
+      },
     };
 
     internals.ingestDeviceEvent({ node_id: 123, endpoint_id: 1, cluster_id: 59, event_id: 1 });
     internals.ingestDeviceEvent({ node_id: 123, endpoint_id: 1, cluster_id: 59, event_id: 6 });
 
     expect(events).toEqual(["room.remote.button.1.initialPress"]);
+    expect(logs[0]).toMatchObject({
+      direction: "received",
+      kind: "event",
+      subject: "room.remote",
+      key: "room.remote",
+      nodeId: 123,
+      endpoint: 1,
+      clusterId: 59,
+      eventId: 1,
+      event: "room.remote.button.1.initialPress",
+    });
   });
 
   it("keeps BILRESA multipress fallback when initial press is absent", () => {
@@ -317,6 +332,37 @@ describe("MatterProvider command translation", () => {
     });
   });
 
+  it("can ingest cached node snapshots without emitting source values", () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const updates: Array<{ source: string; value: unknown }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown }) {
+        updates.push({ source: update.source, value: update.value });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.sources = [
+      {
+        source: "room.door.open",
+        key: "room.door",
+        property: "open",
+        provider: "matter",
+        path: "1/69/0",
+        when: false,
+      },
+    ];
+
+    internals.ingestNodes(
+      [{ node_id: 123, available: true, attributes: { "0/40/5": "Room Door", "1/69/0": false } }],
+      { emitSourceValues: false },
+    );
+
+    expect(internals.nodeByKey.get("room.door")).toBe(123);
+    expect(internals.sourceByNodePath.get("123:1/69/0")).toEqual([internals.sources[0]]);
+    expect(updates).toEqual([]);
+  });
+
   it("refreshes bound source values during a target probe", async () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
@@ -358,8 +404,12 @@ describe("MatterProvider command translation", () => {
   it("marks ping_node false results as failed and unavailable", async () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
+    const logs: any[] = [];
     internals.runtime = {
       notifyProviderChanged() {},
+      logMatter(entry: any) {
+        logs.push(entry);
+      },
     };
     internals.nodeByKey.set("room.remote", 123);
     internals.availableByNode.set(123, true);
@@ -379,6 +429,16 @@ describe("MatterProvider command translation", () => {
     expect(internals.availableByNode.get(123)).toBe(false);
     expect(internals.offlineSinceByNode.get(123)).toEqual(expect.any(Number));
     expect(internals.lastProbeByTarget.get("room.remote")).toEqual(expect.any(Number));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      direction: "sent",
+      kind: "ping",
+      subject: "room.remote",
+      key: "room.remote",
+      nodeId: 123,
+      ok: false,
+      error: "Matter ping failed",
+    });
   });
 
   it("keeps ping_node true results available", async () => {
@@ -406,7 +466,7 @@ describe("MatterProvider command translation", () => {
     expect(internals.offlineSinceByNode.get(123)).toBeUndefined();
   });
 
-  it("pings resolved available targets with stale source updates", async () => {
+  it("probes stale Thread source values with attribute reads", async () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
     const source = {
@@ -430,20 +490,25 @@ describe("MatterProvider command translation", () => {
     internals.sourceRefs.set(source.source, { updated: () => Date.now() - 121_000 });
     internals.nodeByKey.set("room.light", 123);
     internals.availableByNode.set(123, true);
+    internals.rssiByNode.set(123, -54);
     internals.sourceByNodePath.set("123:1/6/0", [source]);
     const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
     internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
       messages.push(message);
-      return { result: { "fd00::123": true } };
+      return { result: { [message.args.attribute_path as string]: message.args.attribute_path === "1/6/0" ? true : "Room Light" } };
     };
 
     await internals.probeStaleTargets();
 
-    expect(updates).toEqual([]);
+    expect(updates).toEqual([{ source: "room.light.power", value: true }]);
     expect(messages).toEqual([
       {
-        command: "ping_node",
-        args: { node_id: 123 },
+        command: "read_attribute",
+        args: { node_id: 123, attribute_path: "1/6/0" },
+      },
+      {
+        command: "read_attribute",
+        args: { node_id: 123, attribute_path: "0/40/5" },
       },
     ]);
     expect(internals.availableByNode.get(123)).toBe(true);
@@ -472,6 +537,7 @@ describe("MatterProvider command translation", () => {
     internals.sourceRefs.set(source.source, { updated: () => Date.now() });
     internals.nodeByKey.set("room.light", 123);
     internals.availableByNode.set(123, true);
+    internals.rssiByNode.set(123, -54);
     internals.sourceByNodePath.set("123:1/6/0", [source]);
     internals.send = async () => {
       readCount += 1;
@@ -484,7 +550,7 @@ describe("MatterProvider command translation", () => {
     expect(internals.lastProbeByTarget.get("room.light")).toBeUndefined();
   });
 
-  it("pings unavailable targets after the slower stale window", async () => {
+  it("probes unavailable Thread sources after the slower stale window", async () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
     const source = {
@@ -508,60 +574,71 @@ describe("MatterProvider command translation", () => {
     internals.sourceRefs.set(source.source, { updated: () => Date.now() - 301_000 });
     internals.nodeByKey.set("room.light", 123);
     internals.availableByNode.set(123, false);
+    internals.rssiByNode.set(123, -54);
     internals.sourceByNodePath.set("123:1/6/0", [source]);
-    internals.send = async () => ({
-      result: { "fd00::123": true },
+    internals.send = async (message: { args: { attribute_path: string } }) => ({
+      result: { [message.args.attribute_path]: message.args.attribute_path === "1/6/0" ? true : "Room Light" },
     });
 
     await internals.probeStaleTargets();
 
-    expect(updates).toEqual([]);
+    expect(updates).toEqual([{ source: "room.light.power", value: true }]);
     expect(internals.availableByNode.get(123)).toBe(true);
     expect(internals.lastProbeByTarget.get("room.light")).toEqual(expect.any(Number));
   });
 
-  it("limits stale pings to one target per pass by default", async () => {
-    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
-    const internals = provider as any;
-    const sources = ["room.one.power", "room.two.power"].map((source) => ({
-      source,
-      key: source.replace(".power", ""),
-      property: "power",
-      provider: "matter",
-      path: "1/6/0",
-    }));
-    const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
-    internals.runtime = {
-      updateSource() {},
-      notifyProviderChanged() {},
-    };
-    internals.connected = true;
-    internals.ws = { readyState: 1 };
-    internals.targets.set("room.one", { target: "room.one", capabilities: {} });
-    internals.targets.set("room.two", { target: "room.two", capabilities: {} });
-    internals.sources = sources;
-    for (const source of sources) {
-      internals.sourceRefs.set(source.source, { updated: () => Date.now() - 121_000 });
+  it("limits stale Thread source probes when configured", async () => {
+    const previousMax = process.env.MATTER_STALE_PROBE_MAX_PER_PASS;
+    process.env.MATTER_STALE_PROBE_MAX_PER_PASS = "1";
+    try {
+      const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+      const internals = provider as any;
+      const sources = ["room.one.power", "room.two.power"].map((source) => ({
+        source,
+        key: source.replace(".power", ""),
+        property: "power",
+        provider: "matter",
+        path: "1/6/0",
+      }));
+      const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
+      internals.runtime = {
+        updateSource() {},
+        notifyProviderChanged() {},
+      };
+      internals.connected = true;
+      internals.ws = { readyState: 1 };
+      internals.sources = sources;
+      for (const source of sources) {
+        internals.sourceRefs.set(source.source, { updated: () => Date.now() - 121_000 });
+      }
+      internals.nodeByKey.set("room.one", 1);
+      internals.nodeByKey.set("room.two", 2);
+      internals.availableByNode.set(1, true);
+      internals.availableByNode.set(2, true);
+      internals.rssiByNode.set(1, -54);
+      internals.rssiByNode.set(2, -55);
+      internals.sourceByNodePath.set("1:1/6/0", [sources[0]]);
+      internals.sourceByNodePath.set("2:1/6/0", [sources[1]]);
+      internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
+        messages.push(message);
+        return { result: { [message.args.attribute_path as string]: true } };
+      };
+
+      await internals.probeStaleTargets();
+
+      expect(messages.map((message) => message.args.node_id)).toEqual([1, 1]);
+      expect(internals.lastProbeByTarget.get("room.one")).toEqual(expect.any(Number));
+      expect(internals.lastProbeByTarget.get("room.two")).toBeUndefined();
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.MATTER_STALE_PROBE_MAX_PER_PASS;
+      } else {
+        process.env.MATTER_STALE_PROBE_MAX_PER_PASS = previousMax;
+      }
     }
-    internals.nodeByKey.set("room.one", 1);
-    internals.nodeByKey.set("room.two", 2);
-    internals.availableByNode.set(1, true);
-    internals.availableByNode.set(2, true);
-    internals.sourceByNodePath.set("1:1/6/0", [sources[0]]);
-    internals.sourceByNodePath.set("2:1/6/0", [sources[1]]);
-    internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
-      messages.push(message);
-      return { result: { "fd00::node": true } };
-    };
-
-    await internals.probeStaleTargets();
-
-    expect(messages).toEqual([{ command: "ping_node", args: { node_id: 1 } }]);
-    expect(internals.lastProbeByTarget.get("room.one")).toEqual(expect.any(Number));
-    expect(internals.lastProbeByTarget.get("room.two")).toBeUndefined();
   });
 
-  it("does not stale-ping the same Matter node through multiple target aliases", async () => {
+  it("does not stale-probe the same Matter node through multiple source aliases", async () => {
     const previousMax = process.env.MATTER_STALE_PROBE_MAX_PER_PASS;
     process.env.MATTER_STALE_PROBE_MAX_PER_PASS = "2";
     try {
@@ -599,16 +676,21 @@ describe("MatterProvider command translation", () => {
       internals.nodeByKey.set("room.light", 123);
       internals.nodeByKey.set("room.light.endpoint.6.statusLed", 123);
       internals.availableByNode.set(123, true);
+      internals.rssiByNode.set(123, -54);
       internals.sourceByNodePath.set("123:1/6/0", [sources[0]]);
       internals.sourceByNodePath.set("123:6/6/0", [sources[1]]);
       internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
         messages.push(message);
-        return { result: { "fd00::123": true } };
+        return { result: { [message.args.attribute_path as string]: true } };
       };
 
       await internals.probeStaleTargets();
 
-      expect(messages).toEqual([{ command: "ping_node", args: { node_id: 123 } }]);
+      expect(messages.map((message) => message.args)).toEqual([
+        { node_id: 123, attribute_path: "1/6/0" },
+        { node_id: 123, attribute_path: "6/6/0" },
+        { node_id: 123, attribute_path: "0/40/5" },
+      ]);
       expect(internals.lastProbeByTarget.get("room.light")).toEqual(expect.any(Number));
       expect(internals.lastProbeByTarget.get("room.light.endpoint.6.statusLed")).toBeUndefined();
     } finally {
@@ -616,6 +698,113 @@ describe("MatterProvider command translation", () => {
         delete process.env.MATTER_STALE_PROBE_MAX_PER_PASS;
       } else {
         process.env.MATTER_STALE_PROBE_MAX_PER_PASS = previousMax;
+      }
+    }
+  });
+
+  it("keeps flagged remotes warm without pinging ordinary button targets", async () => {
+    const previousMax = process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS;
+    const previousPerNode = process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC;
+    process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS = "2";
+    process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC = "5";
+    try {
+      const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+      const internals = provider as any;
+      const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
+      internals.runtime = {
+        notifyProviderChanged() {},
+        logMatter() {},
+      };
+      internals.connected = true;
+      internals.ws = { readyState: 1 };
+      internals.targets.set("room.remote", {
+        target: "room.remote",
+        capabilities: {
+          buttons: {
+            1: { endpoint: 1, cluster: 59 },
+          },
+          remoteKeepalive: true,
+        },
+      });
+      internals.targets.set("room.otherRemote", {
+        target: "room.otherRemote",
+        capabilities: {
+          buttons: {
+            1: { endpoint: 1, cluster: 59 },
+          },
+        },
+      });
+      internals.nodeByKey.set("room.remote", 123);
+      internals.nodeByKey.set("room.otherRemote", 456);
+      internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
+        messages.push(message);
+        return { result: { "fd00::node": true } };
+      };
+
+      await internals.pingRemoteTargetsOnce();
+
+      expect(messages).toEqual([{ command: "ping_node", args: { node_id: 123 } }]);
+      expect(internals.lastProbeByTarget.get("room.remote")).toEqual(expect.any(Number));
+      expect(internals.lastProbeByTarget.get("room.otherRemote")).toBeUndefined();
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS;
+      } else {
+        process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS = previousMax;
+      }
+      if (previousPerNode === undefined) {
+        delete process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC;
+      } else {
+        process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC = previousPerNode;
+      }
+    }
+  });
+
+  it("dedupes remote keepalive pings by Matter node", async () => {
+    const previousMax = process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS;
+    const previousPerNode = process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC;
+    process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS = "3";
+    process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC = "5";
+    try {
+      const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+      const internals = provider as any;
+      const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
+      internals.runtime = {
+        notifyProviderChanged() {},
+        logMatter() {},
+      };
+      internals.connected = true;
+      internals.ws = { readyState: 1 };
+      for (const target of ["room.remote", "room.remote.alias"]) {
+        internals.targets.set(target, {
+          target,
+          capabilities: {
+            buttons: {
+              1: { endpoint: 1, cluster: 59 },
+            },
+            remoteKeepalive: true,
+          },
+        });
+        internals.nodeByKey.set(target, 123);
+      }
+      internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
+        messages.push(message);
+        return { result: { "fd00::123": true } };
+      };
+
+      await internals.pingRemoteTargetsOnce();
+
+      expect(messages).toEqual([{ command: "ping_node", args: { node_id: 123 } }]);
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS;
+      } else {
+        process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS = previousMax;
+      }
+      if (previousPerNode === undefined) {
+        delete process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC;
+      } else {
+        process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC = previousPerNode;
       }
     }
   });

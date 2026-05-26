@@ -55,13 +55,17 @@ describe("snapshot deltas", () => {
         },
       },
     });
+    snapshot = applySnapshotDelta(snapshot, {
+      type: "matterLog",
+      log: { id: 3, at: 4, direction: "received", kind: "event", subject: "room.remote", key: "room.remote", event: "room.remote.button.1.initialPress" },
+    });
 
     expect(snapshot.sources[0].value).toBe(true);
     expect(snapshot.signals[0]).toMatchObject({ value: true, lastRunAt: 2 });
     expect(snapshot.rules[0]).toMatchObject({ lastRunAt: 2 });
     expect(snapshot.layers[0].surfaced?.output.state).toEqual({ power: "on" });
     expect(snapshot.commands).toHaveLength(1);
-    expect(snapshot.matterLog).toHaveLength(2);
+    expect(snapshot.matterLog).toHaveLength(3);
     expect(snapshot.providers[0].status?.resolved?.[0].available).toBe(false);
   });
 });

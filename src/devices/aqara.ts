@@ -12,6 +12,10 @@ export function fp300(key: string) {
       path: "2/1024/0",
       encoding: "matter-illuminance",
     },
+    metrics: [
+      { property: "temperature", label: "Temp", path: "3/1026/0", encoding: "matter-temperature", unit: "°" },
+      { property: "humidity", label: "Humidity", path: "4/1029/0", encoding: "matter-humidity", unit: "%" },
+    ],
     status: {
       path: "1/1030/0",
       when: true,

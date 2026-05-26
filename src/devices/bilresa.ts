@@ -20,6 +20,7 @@ export function bilresa(key: string): Remote {
     events: {
       initialPress: "InitialPress",
     },
+    remoteKeepalive: true,
     battery: {
       path: "0/47/12",
       encoding: "matter-battery-percent",
