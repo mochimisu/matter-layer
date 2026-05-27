@@ -93,6 +93,41 @@ describe("Inovelli status LED rule", () => {
     runtime.stop();
   });
 
+  it("labels paddle overrides and refreshes them for 30 minutes", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light");
+        }),
+      ],
+      rules: [
+        defineRoomRules("room", ({ room, rule }) => {
+          rule("light", () => room.light.auto(false));
+        }),
+      ],
+    });
+    await runtime.start();
+
+    const pressedAt = Date.now();
+    runtime.dispatchEvent("room.light.paddle.up.singlePress");
+    await tick();
+
+    const override = runtime.layers.surface("room.light");
+    expect(override).toMatchObject({
+      layer: "override",
+      output: {
+        state: { power: "on" },
+        reason: expect.stringMatching(/^Paddle pressed until \d{1,2}:\d{2} [AP]M$/),
+        expiresAt: expect.any(Number),
+      },
+    });
+    expect(override?.output.expiresAt).toBeGreaterThanOrEqual(pressedAt + 30 * 60_000);
+    expect(override?.output.expiresAt).toBeLessThanOrEqual(Date.now() + 30 * 60_000);
+
+    runtime.stop();
+  });
+
   it("applies the latest active layer after clearing a web override while LED commands are in flight", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     const provider = new SlowLedProvider();

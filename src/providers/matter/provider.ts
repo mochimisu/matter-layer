@@ -46,6 +46,7 @@ export class MatterProvider implements ProviderAdapter {
   private remoteKeepaliveTimer?: NodeJS.Timeout;
   private remoteKeepaliveRunning = false;
   private remoteKeepaliveCursor = 0;
+  private startupAttributeSyncRunning = false;
   private recentInitialPressByEndpoint = new Map<string, number>();
   private sourceByNodePath = new Map<string, SourceBinding[]>();
   private nextMessageId = 0;
@@ -67,7 +68,7 @@ export class MatterProvider implements ProviderAdapter {
     },
   ) {}
 
-  start(
+  async start(
     runtime: Runtime & {
       sources?: Map<string, { binding: SourceBinding; updated: () => number | undefined }>;
       targets?: Map<string, any>;
@@ -93,9 +94,10 @@ export class MatterProvider implements ProviderAdapter {
     if (this.options.enabled === false) {
       return;
     }
-    this.connect();
+    const startup = this.connect();
     this.startStaleProbeLoop();
     this.startRemoteKeepaliveLoop();
+    await startup;
   }
 
   async apply(command: DesiredCommand): Promise<CommandResult> {
@@ -310,6 +312,26 @@ export class MatterProvider implements ProviderAdapter {
   private connect() {
     const ws = new WebSocket(this.options.url, { maxPayload: 1024 * 1024 * 32 });
     this.ws = ws;
+    let startupSettled = false;
+    let startupTimeout: NodeJS.Timeout | undefined;
+    let settleStartup = () => {};
+    const startupReady = new Promise<void>((resolve) => {
+      settleStartup = () => {
+        if (startupSettled) {
+          return;
+        }
+        startupSettled = true;
+        if (startupTimeout) {
+          clearTimeout(startupTimeout);
+          startupTimeout = undefined;
+        }
+        resolve();
+      };
+    });
+    const timeoutMs = Math.max(1000, Number(process.env.MATTER_STARTUP_SYNC_TIMEOUT_SEC ?? "30") * 1000);
+    startupTimeout = setTimeout(settleStartup, timeoutMs);
+    startupTimeout.unref?.();
+
     ws.on("open", () => {
       this.connected = true;
       this.runtime?.notifyProviderChanged?.(this.name);
@@ -332,7 +354,8 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
       if (message.message_id === "matter-layer-start" && Array.isArray(message.result)) {
-        this.ingestNodes(message.result, { emitSourceValues: false });
+        this.ingestNodes(message.result, { markSourcesUpdated: false });
+        void this.syncStartupSourceAttributes().finally(settleStartup);
       }
       if (message.event === "node_updated" && message.data) {
         this.lastMessageAt = Date.now();
@@ -354,6 +377,7 @@ export class MatterProvider implements ProviderAdapter {
     });
     ws.on("close", () => {
       this.connected = false;
+      settleStartup();
       if (this.listenRefreshTimer) {
         clearInterval(this.listenRefreshTimer);
         this.listenRefreshTimer = undefined;
@@ -364,8 +388,71 @@ export class MatterProvider implements ProviderAdapter {
         pending.reject(new Error(`Matter websocket closed before response to ${messageId}`));
       }
       this.pending.clear();
-      setTimeout(() => this.connect(), 1000);
+      setTimeout(() => void this.connect(), 1000);
     });
+    ws.on("error", () => {
+      settleStartup();
+    });
+    return startupReady;
+  }
+
+  private async syncStartupSourceAttributes() {
+    if (this.options.dryRun || this.startupAttributeSyncRunning) {
+      return;
+    }
+    this.startupAttributeSyncRunning = true;
+    try {
+      const pathsByNode = this.startupReadPathsByNode();
+      for (const [nodeId, paths] of pathsByNode) {
+        let ok = false;
+        for (const path of paths) {
+          try {
+            const response = await this.send(
+              {
+                command: "read_attribute",
+                args: {
+                  node_id: nodeId,
+                  attribute_path: path,
+                },
+              },
+              5_000,
+            );
+            const value = this.valueFromReadResponse(response, path);
+            this.emitNodePath(nodeId, path, value, { markUpdated: true });
+            ok = true;
+          } catch {
+            // Startup sync is best-effort; later subscriptions and stale probes keep sources fresh.
+          }
+        }
+        if (paths.length > 0) {
+          this.setNodeAvailability(nodeId, ok);
+        }
+      }
+    } finally {
+      this.startupAttributeSyncRunning = false;
+    }
+  }
+
+  private startupReadPathsByNode() {
+    const pathsByNode = new Map<number, Set<string>>();
+    for (const [nodePath, bindings] of this.sourceByNodePath) {
+      if (!bindings.some((binding) => binding.provider === "matter")) {
+        continue;
+      }
+      const separator = nodePath.indexOf(":");
+      const nodeId = Number(nodePath.slice(0, separator));
+      const path = nodePath.slice(separator + 1);
+      if (!Number.isFinite(nodeId) || !path) {
+        continue;
+      }
+      let paths = pathsByNode.get(nodeId);
+      if (!paths) {
+        paths = new Set();
+        pathsByNode.set(nodeId, paths);
+      }
+      paths.add(path);
+    }
+    return new Map([...pathsByNode.entries()].map(([nodeId, paths]) => [nodeId, [...paths]]));
   }
 
   private startListenRefreshLoop() {
@@ -562,13 +649,13 @@ export class MatterProvider implements ProviderAdapter {
     this.runtime?.updateSource(update);
   }
 
-  private emitNodePath(nodeId: number, path: string, raw: unknown) {
+  private emitNodePath(nodeId: number, path: string, raw: unknown, options: { markUpdated?: boolean } = {}) {
     const bindings = this.sourceByNodePath.get(`${nodeId}:${path}`);
     if (!bindings) {
       return;
     }
     for (const binding of bindings) {
-      this.emit(binding, raw);
+      this.emit(binding, raw, options);
     }
   }
 

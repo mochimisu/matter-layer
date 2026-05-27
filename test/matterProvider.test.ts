@@ -363,6 +363,97 @@ describe("MatterProvider command translation", () => {
     expect(updates).toEqual([]);
   });
 
+  it("can seed startup source values from cached node snapshots without marking them fresh", () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const updates: Array<{ source: string; value: unknown; markUpdated?: boolean }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown; markUpdated?: boolean }) {
+        updates.push({ source: update.source, value: update.value, markUpdated: update.markUpdated });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.sources = [
+      {
+        source: "room.presence.presence",
+        key: "room.presence",
+        property: "presence",
+        provider: "matter",
+        path: "2/1030/0",
+        when: true,
+      },
+    ];
+
+    internals.ingestNodes(
+      [{ node_id: 123, available: true, attributes: { "0/40/5": "Room Presence", "2/1030/0": true } }],
+      { markSourcesUpdated: false },
+    );
+
+    expect(internals.nodeByKey.get("room.presence")).toBe(123);
+    expect(updates).toEqual([
+      { source: "room.presence.presence", value: true, markUpdated: false },
+    ]);
+  });
+
+  it("syncs startup source values with explicit Matter attribute reads", async () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    const updates: Array<{ source: string; value: unknown; markUpdated?: boolean }> = [];
+    const sources = [
+      {
+        source: "room.light.power",
+        key: "room.light",
+        property: "power",
+        provider: "matter",
+        path: "1/6/0",
+      },
+      {
+        source: "room.light.level",
+        key: "room.light",
+        property: "level",
+        provider: "matter",
+        path: "1/8/0",
+      },
+    ];
+    const messages: Array<{ command: string; args: Record<string, unknown> }> = [];
+    internals.runtime = {
+      updateSource(update: { source: string; value: unknown; markUpdated?: boolean }) {
+        updates.push({ source: update.source, value: update.value, markUpdated: update.markUpdated });
+      },
+      notifyProviderChanged() {},
+    };
+    internals.sources = sources;
+    internals.send = async (message: { command: string; args: Record<string, unknown> }) => {
+      messages.push(message);
+      return {
+        result: {
+          [message.args.attribute_path as string]: message.args.attribute_path === "1/6/0" ? false : 87,
+        },
+      };
+    };
+
+    internals.ingestNodes(
+      [{ node_id: 123, available: true, attributes: { "0/40/5": "Room Light", "1/6/0": true, "1/8/0": 254 } }],
+      { emitSourceValues: false },
+    );
+    await internals.syncStartupSourceAttributes();
+
+    expect(messages).toEqual([
+      {
+        command: "read_attribute",
+        args: { node_id: 123, attribute_path: "1/6/0" },
+      },
+      {
+        command: "read_attribute",
+        args: { node_id: 123, attribute_path: "1/8/0" },
+      },
+    ]);
+    expect(updates).toEqual([
+      { source: "room.light.power", value: false, markUpdated: true },
+      { source: "room.light.level", value: 87, markUpdated: true },
+    ]);
+  });
+
   it("refreshes bound source values during a target probe", async () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;

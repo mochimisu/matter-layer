@@ -50,9 +50,9 @@ export const epaperProfiles: Record<string, EpaperProfile> = {
     height: 480,
     palette: "mono",
     background: "#fbfbf6",
-    foreground: "#111",
-    accent: "#111",
-    inverse: "#111",
+    foreground: "#000",
+    accent: "#000",
+    inverse: "#000",
     inverseText: "#fff",
   },
 };
@@ -109,10 +109,7 @@ export async function renderRoomEpaperPanelPng(snapshot: Snapshot, options: Epap
     const image = sharp(Buffer.from(svg)).flatten({ background: profile.background });
     png = await image.grayscale().threshold(128).png({ compressionLevel: 9, palette: true, colors: 2 }).toBuffer();
   } else if (profile.palette === "grayscale") {
-    const image = sharp(Buffer.from(svg), { density: 216 })
-      .resize(profile.width, profile.height, { fit: "fill", kernel: "lanczos3" })
-      .flatten({ background: profile.background });
-    png = await image.grayscale().png({ compressionLevel: 9 }).toBuffer();
+    png = await renderCrispGrayscalePng(svg, profile);
   } else {
     const image = sharp(Buffer.from(svg), { density: 216 })
       .resize(profile.width, profile.height, { fit: "fill", kernel: "lanczos3" })
@@ -125,6 +122,61 @@ export async function renderRoomEpaperPanelPng(snapshot: Snapshot, options: Epap
 
 export const renderOfficeEpaperSvg = renderRoomEpaperPanelSvg;
 export const renderOfficeEpaperPng = renderRoomEpaperPanelPng;
+
+async function renderCrispGrayscalePng(svg: string, profile: EpaperProfile) {
+  const baseSvg = removeEpaperText(svg);
+  const textSvg = epaperTextOverlaySvg(svg, profile);
+  const base = await sharp(Buffer.from(baseSvg)).flatten({ background: profile.background }).grayscale().png().toBuffer();
+  const text = await sharp(Buffer.from(textSvg), { density: 216 })
+    .resize(profile.width, profile.height, { fit: "fill", kernel: "lanczos3" })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const textOverlay = sharpenTextAlpha(text.data, text.info.width, text.info.height, text.info.channels);
+  return sharp(base)
+    .composite([{ input: textOverlay, raw: { width: text.info.width, height: text.info.height, channels: 4 }, blend: "over" }])
+    .removeAlpha()
+    .grayscale()
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
+function addEpaperTextCrispPass(svg: string) {
+  return svg.replace(/<text\b([^>]*)>/g, (tag, attrs: string) => {
+    if (/\bstroke=/.test(attrs)) return tag;
+    const fill = attrs.match(/\bfill="([^"]+)"/)?.[1];
+    if (!fill || fill === "none" || fill.startsWith("url(")) return tag;
+    return `<text${attrs} stroke="${fill}" stroke-width="0.04" stroke-linejoin="round" paint-order="stroke fill">`;
+  });
+}
+
+function removeEpaperText(svg: string) {
+  return svg.replace(/<text\b[\s\S]*?<\/text>/g, "");
+}
+
+function epaperTextOverlaySvg(svg: string, profile: EpaperProfile) {
+  const text = Array.from(svg.matchAll(/<text\b[\s\S]*?<\/text>/g), (match) => addEpaperTextCrispPass(match[0])).join("\n  ");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${profile.width}" height="${profile.height}" viewBox="0 0 ${profile.width} ${profile.height}">
+  <defs><style>text{font-kerning:none;}</style></defs>
+  ${text}
+</svg>`;
+}
+
+function sharpenTextAlpha(data: Buffer, width: number, height: number, channels: number) {
+  const output = Buffer.from(data);
+  if (channels < 4) return output;
+  for (let index = 0; index < output.length; index += channels) {
+    const alpha = output[index + 3];
+    if (alpha === 0) continue;
+    const normalized = alpha / 255;
+    const contrasted = normalized < 0.18
+      ? normalized * 0.55
+      : Math.pow(normalized, 0.68);
+    output[index + 3] = Math.max(0, Math.min(255, Math.round(contrasted * 255)));
+  }
+  return output;
+}
 
 function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & { room: string; title: string; display: EpaperDisplayDefinition }, renderNow?: number) {
   const profile = resolveEpaperProfile(options);
@@ -205,7 +257,7 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${profile.width}" height="${profile.height}" viewBox="0 0 ${profile.width} ${profile.height}">
   <defs>
-    <style>text{font-kerning:none;}</style>
+    <style>text{font-kerning:none;}rect,line{shape-rendering:crispEdges;}</style>
     <pattern id="epaper-grid" width="${20 * scaleX}" height="${20 * scaleY}" patternUnits="userSpaceOnUse">
       <path d="M ${20 * scaleX} 0 L 0 0 0 ${20 * scaleY}" fill="none" stroke="${profile.foreground}" stroke-opacity="0.08" stroke-width="${Math.max(1, scaleX)}"/>
     </pattern>
@@ -277,16 +329,15 @@ function renderCompactDeviceRow(
   scaleX: number,
   scaleY: number,
 ) {
-  const active = ["on", "open", "active", "opening", "closing"].includes(String(device.tone));
+  const row = epaperDeviceRowColors(device.tone, profile);
   const y = baseY * scaleY;
-  const bg = active ? profile.inverse : profile.background;
-  const fg = active ? profile.inverseText : profile.foreground;
   const layer = device.layer ?? "";
   return `<g>
-    <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${20 * scaleY}" fill="${bg}" stroke="${profile.foreground}" stroke-width="${1.5 * Math.min(scaleX, scaleY)}"/>
-    <text x="${snap(36 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(11 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.label, 20))}</text>
-    <text x="${snap(184 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(9 * Math.min(scaleX, scaleY))}" font-weight="900">${layer ? `[${escapeXml(truncateText(layer, 18))}]` : ""}</text>
-    <text x="${snap(374 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 10))}</text>
+    <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${20 * scaleY}" fill="${row.bg}" stroke="${profile.foreground}" stroke-width="${1.5 * Math.min(scaleX, scaleY)}"/>
+    ${renderCompactDeviceIcon(device.icon, 34, baseY + 3, row.inverted, profile, scaleX, scaleY)}
+    <text x="${snap(58 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(11 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.label, 17))}</text>
+    <text x="${snap(190 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(9 * Math.min(scaleX, scaleY))}" font-weight="900">${layer ? `[${escapeXml(truncateText(layer, 17))}]` : ""}</text>
+    <text x="${snap(374 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 10))}</text>
   </g>`;
 }
 
@@ -297,21 +348,28 @@ function renderDeviceRow(
   scaleX: number,
   scaleY: number,
 ) {
-  const active = ["on", "open", "active", "opening", "closing"].includes(String(device.tone));
+  const row = epaperDeviceRowColors(device.tone, profile);
   const y = baseY * scaleY;
-  const bg = active ? profile.inverse : profile.background;
-  const fg = active ? profile.inverseText : profile.foreground;
   return `<g>
-    <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${38 * scaleY}" fill="${bg}" stroke="${profile.foreground}" stroke-width="${2 * Math.min(scaleX, scaleY)}"/>
+    <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${38 * scaleY}" fill="${row.bg}" stroke="${profile.foreground}" stroke-width="${2 * Math.min(scaleX, scaleY)}"/>
     <rect x="${24 * scaleX}" y="${y}" width="${9 * scaleX}" height="${38 * scaleY}" fill="${device.layer ? profile.accent : "url(#epaper-hatch)"}"/>
-    ${renderDeviceIcon(device.icon, 43, baseY + 8, active, profile, scaleX, scaleY)}
-    <text x="${snap(70 * scaleX)}" y="${snap(y + 16 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(device.label)}</text>
-    <text x="${snap(70 * scaleX)}" y="${snap(y + 31 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.layer || "no active layer", 33))}</text>
-    <text x="${snap(374 * scaleX)}" y="${snap(y + 17 * scaleY)}" fill="${fg}" font-family="${epaperFontFamily}" font-size="${snap(12 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 11))}</text>
+    ${renderDeviceIcon(device.icon, 43, baseY + 8, row.inverted, profile, scaleX, scaleY)}
+    <text x="${snap(70 * scaleX)}" y="${snap(y + 16 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(device.label)}</text>
+    <text x="${snap(70 * scaleX)}" y="${snap(y + 31 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.layer || "no active layer", 33))}</text>
+    <text x="${snap(374 * scaleX)}" y="${snap(y + 17 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(12 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 11))}</text>
   </g>`;
 }
 
 type EpaperDeviceIconKind = "light" | "blind" | "presence" | "door" | "generic";
+
+function epaperDeviceRowColors(tone: string | undefined, profile: EpaperProfile) {
+  const inverted = tone === "off";
+  return {
+    bg: inverted ? profile.inverse : profile.background,
+    fg: inverted ? profile.inverseText : profile.foreground,
+    inverted,
+  };
+}
 
 function epaperDeviceIconKind(target: SnapshotTarget, status?: string): EpaperDeviceIconKind {
   const product = String(target.capabilities?.product ?? "").toLowerCase();
@@ -320,6 +378,21 @@ function epaperDeviceIconKind(target: SnapshotTarget, status?: string): EpaperDe
   if (product.includes("presence")) return "presence";
   if (status === "open" || status === "closed" || product.includes("door")) return "door";
   return "generic";
+}
+
+function renderCompactDeviceIcon(
+  kind: EpaperDeviceIconKind,
+  baseX: number,
+  baseY: number,
+  active: boolean,
+  profile: EpaperProfile,
+  scaleX: number,
+  scaleY: number,
+) {
+  const scale = 0.72 * Math.min(scaleX, scaleY);
+  return `<g transform="translate(${baseX * scaleX} ${baseY * scaleY}) scale(${scale})">
+    ${renderDeviceIcon(kind, 0, 0, active, profile, 1, 1)}
+  </g>`;
 }
 
 function renderDeviceIcon(

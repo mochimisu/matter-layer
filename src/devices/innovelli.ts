@@ -1,6 +1,6 @@
 import { activeLayer, eventAction, light, rule } from "matter-layer/devices";
-import { state } from "matter-layer/rules";
 import type { Light, LightOptions } from "matter-layer/devices";
+import { parseDuration } from "../runtime/state";
 import type { LayerName } from "../runtime/types";
 
 const ledColors: Partial<Record<LayerName, string>> = {
@@ -69,15 +69,13 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
   });
 
   function manualOverride(value: string, ttl: string = "30m") {
-    if (device.layer.override) {
-      device.layer.override.clear();
-      return;
-    }
-    device.layer.override = state.expiring(
-      { power: value },
-      { layer: "override", reason: "Device Interaction" },
-      ttl,
-    );
+    const expiresAt = Date.now() + parseDuration(ttl);
+    device.layer.override = {
+      state: { power: value },
+      layer: "override",
+      reason: `Paddle pressed until ${formatExpirationTime(expiresAt)}`,
+      expiresAt,
+    };
   }
 
   device.paddle("up").onSinglePress(() => manualOverride("on"));
@@ -105,4 +103,13 @@ function ledStateFor(active: {
     color: ledColors[active.layer],
     level: power === "off" || power === false ? "10%" : "50%",
   };
+}
+
+function formatExpirationTime(timestamp: number) {
+  const date = new Date(timestamp);
+  const hour = date.getHours();
+  const minute = date.getMinutes().toString().padStart(2, "0");
+  const displayHour = hour % 12 || 12;
+  const meridiem = hour >= 12 ? "PM" : "AM";
+  return `${displayHour}:${minute} ${meridiem}`;
 }
