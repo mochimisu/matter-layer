@@ -8,7 +8,12 @@ export const epaperDisplays = [
 ] satisfies EpaperDisplayDefinition[];
 
 export function epaperDisplayById(id: string | undefined) {
-  return epaperDisplays.find((display) => display.id === id) ?? epaperDisplays[0];
+  const normalized = normalizeDisplayId(id);
+  return epaperDisplays.find((display) => normalizeDisplayId(display.id) === normalized || normalizeDisplayId(display.room) === normalized) ?? epaperDisplays[0];
+}
+
+function normalizeDisplayId(id: string | undefined) {
+  return (id ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 export type { EpaperDisplayDefinition, EpaperStatDefinition } from "./types";

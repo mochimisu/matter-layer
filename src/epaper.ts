@@ -43,6 +43,17 @@ export type EpaperRenderOptions = Partial<Pick<EpaperProfile, "width" | "height"
   now?: number;
 };
 
+export type EpaperRenderState = {
+  displayId: string;
+  room: string;
+  title: string;
+  width: number;
+  height: number;
+  palette: EpaperPalette;
+  fingerprint: string;
+  generatedAt: number;
+};
+
 export const epaperProfiles: Record<string, EpaperProfile> = {
   "xiao-7.5-mono": {
     id: "xiao-7.5-mono",
@@ -72,16 +83,8 @@ export function resolveEpaperProfile(options: EpaperRenderOptions = {}): EpaperP
 }
 
 export function renderRoomEpaperPanelSvg(snapshot: Snapshot, options: EpaperRenderOptions = {}) {
-  const display = epaperDisplayById(options.room);
-  const resolvedOptions = {
-    ...options,
-    room: display.room,
-    title: options.title ?? (display.title ?? humanRoomName(display.room)).toUpperCase(),
-    display,
-  };
-  const now = floorToMinute(options.now ?? Date.now());
+  const { resolvedOptions, now, fingerprint } = resolveEpaperRender(snapshot, options);
   const cacheKey = epaperCacheKey(resolvedOptions);
-  const fingerprint = epaperRenderFingerprint(snapshot, resolvedOptions, now);
   const cached = renderCache.get(cacheKey);
   if (cached?.fingerprint === fingerprint) return cached.svg;
   const svg = renderRoomEpaperSvg(snapshot, resolvedOptions, now);
@@ -90,17 +93,8 @@ export function renderRoomEpaperPanelSvg(snapshot: Snapshot, options: EpaperRend
 }
 
 export async function renderRoomEpaperPanelPng(snapshot: Snapshot, options: EpaperRenderOptions = {}) {
-  const display = epaperDisplayById(options.room);
-  const resolvedOptions = {
-    ...options,
-    room: display.room,
-    title: options.title ?? (display.title ?? humanRoomName(display.room)).toUpperCase(),
-    display,
-  };
-  const profile = resolveEpaperProfile(options);
-  const now = floorToMinute(options.now ?? Date.now());
+  const { resolvedOptions, profile, now, fingerprint } = resolveEpaperRender(snapshot, options);
   const cacheKey = `${epaperCacheKey(resolvedOptions)}:png`;
-  const fingerprint = epaperRenderFingerprint(snapshot, resolvedOptions, now);
   const cached = pngCache.get(cacheKey);
   if (cached?.fingerprint === fingerprint) return cached.png;
   const svg = renderRoomEpaperPanelSvg(snapshot, options);
@@ -120,8 +114,40 @@ export async function renderRoomEpaperPanelPng(snapshot: Snapshot, options: Epap
   return png;
 }
 
+export function getEpaperRenderState(snapshot: Snapshot, options: EpaperRenderOptions = {}): EpaperRenderState {
+  const { resolvedOptions, profile, now, fingerprint } = resolveEpaperRender(snapshot, options);
+  return {
+    displayId: resolvedOptions.display.id,
+    room: resolvedOptions.room,
+    title: resolvedOptions.title,
+    width: profile.width,
+    height: profile.height,
+    palette: profile.palette,
+    fingerprint,
+    generatedAt: now,
+  };
+}
+
 export const renderOfficeEpaperSvg = renderRoomEpaperPanelSvg;
 export const renderOfficeEpaperPng = renderRoomEpaperPanelPng;
+
+function resolveEpaperRender(snapshot: Snapshot, options: EpaperRenderOptions = {}) {
+  const display = epaperDisplayById(options.room);
+  const resolvedOptions = {
+    ...options,
+    room: display.room,
+    title: options.title ?? (display.title ?? humanRoomName(display.room)).toUpperCase(),
+    display,
+  };
+  const profile = resolveEpaperProfile(options);
+  const now = floorToMinute(options.now ?? Date.now());
+  return {
+    resolvedOptions,
+    profile,
+    now,
+    fingerprint: epaperRenderFingerprint(snapshot, resolvedOptions, now),
+  };
+}
 
 async function renderCrispGrayscalePng(svg: string, profile: EpaperProfile) {
   const baseSvg = removeEpaperText(svg);

@@ -1,11 +1,12 @@
 import cors from "cors";
 import express from "express";
 import { readFile } from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { loadConfig } from "./config/config";
-import { parseEpaperRenderOptions, renderRoomEpaperPanelPng, renderRoomEpaperPanelSvg } from "./epaper";
+import { getEpaperRenderState, parseEpaperRenderOptions, renderRoomEpaperPanelPng, renderRoomEpaperPanelSvg, type EpaperRenderOptions, type EpaperRenderState } from "./epaper";
 import { MatterProvider } from "./providers/matter/provider";
 import { MatterLayerRuntime } from "./runtime/engine";
 import { loadRulesModule } from "./runtime/load";
@@ -339,8 +340,25 @@ async function main() {
     console.log(`matter-layer API listening on http://127.0.0.1:${config.port}`);
   });
 
-  const wss = new WebSocketServer({ server, path: "/events" });
+  const wss = new WebSocketServer({ noServer: true });
+  const epaperWss = new WebSocketServer({ noServer: true });
   let eventSeq = 0;
+  let epaperSeq = 0;
+  const epaperClients = new Map<WebSocket, { options: EpaperRenderOptions; state: EpaperRenderState }>();
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+    if (url.pathname === "/events") {
+      wss.handleUpgrade(req, socket, head, (client) => wss.emit("connection", client, req));
+      return;
+    }
+    if (url.pathname === "/epaper-events" || url.pathname.startsWith("/epaper-events/")) {
+      epaperWss.handleUpgrade(req, socket, head, (client) => epaperWss.emit("connection", client, req));
+      return;
+    }
+    socket.destroy();
+  });
+
   wss.on("connection", (client) => {
     client.send(
       JSON.stringify({
@@ -350,8 +368,40 @@ async function main() {
       }),
     );
   });
+
+  epaperWss.on("connection", (client, req) => {
+    const options = epaperRenderOptionsFromRequest(req);
+    const state = getEpaperRenderState(runtime.snapshot(), options);
+    epaperClients.set(client, { options, state });
+    client.send(JSON.stringify(epaperEventPayload("epaper.snapshot", ++epaperSeq, state, options)));
+    client.on("close", () => {
+      epaperClients.delete(client);
+    });
+  });
+
+  const broadcastEpaperUpdates = (event: RuntimeEvent | { type: "epaper.tick" }) => {
+    if (epaperClients.size === 0) return;
+    const snapshot = runtime.snapshot();
+    for (const [client, subscription] of epaperClients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      const state = getEpaperRenderState(snapshot, subscription.options);
+      if (state.fingerprint === subscription.state.fingerprint) continue;
+      subscription.state = state;
+      client.send(JSON.stringify({
+        ...epaperEventPayload("epaper.update", ++epaperSeq, state, subscription.options),
+        event,
+      }));
+    }
+  };
+
+  const epaperTick = setInterval(() => {
+    broadcastEpaperUpdates({ type: "epaper.tick" });
+  }, 60_000);
+  epaperTick.unref?.();
+
   runtime.onEvent((event) => {
     const delta = deltaForEvent(runtime, event);
+    broadcastEpaperUpdates(event);
     if (!delta) {
       return;
     }
@@ -370,6 +420,43 @@ async function main() {
 }
 
 void main();
+
+function epaperRenderOptionsFromRequest(req: IncomingMessage): EpaperRenderOptions {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+  const options = parseEpaperRenderOptions(Object.fromEntries(url.searchParams.entries()));
+  const pathPrefix = "/epaper-events/";
+  const pathRoom = url.pathname.startsWith(pathPrefix) ? decodeURIComponent(url.pathname.slice(pathPrefix.length)) : undefined;
+  return {
+    ...options,
+    room: pathRoom && pathRoom.length > 0 ? pathRoom : options.room,
+  };
+}
+
+function epaperEventPayload(type: "epaper.snapshot" | "epaper.update", seq: number, state: EpaperRenderState, options: EpaperRenderOptions) {
+  return {
+    type,
+    seq,
+    display: state.displayId,
+    room: state.room,
+    title: state.title,
+    width: state.width,
+    height: state.height,
+    palette: state.palette,
+    fingerprint: state.fingerprint,
+    generatedAt: state.generatedAt,
+    url: epaperImageUrl(state, options),
+  };
+}
+
+function epaperImageUrl(state: EpaperRenderState, options: EpaperRenderOptions) {
+  const query = new URLSearchParams();
+  query.set("palette", state.palette);
+  query.set("width", String(state.width));
+  query.set("height", String(state.height));
+  if (options.profile) query.set("profile", options.profile);
+  if (options.title) query.set("title", options.title);
+  return `/api/epaper/${encodeURIComponent(state.displayId)}.png?${query.toString()}`;
+}
 
 function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
   switch (event.type) {
