@@ -22,14 +22,26 @@ export function matterLight(key: string, options: LightOptions = {}) {
   });
 }
 
-export function matterSwitch(key: string) {
-  return switchDevice(key, {
-    power: {
-      path: "1/6/0",
-      commands: {
-        on: { endpoint: 1, cluster: 6, command: "On" },
-        off: { endpoint: 1, cluster: 6, command: "Off" },
+export function matterSwitch(key: string, options: { endpoint?: number } & Record<string, unknown> = {}) {
+  const endpoint = options.endpoint ?? 1;
+  const device = switchDevice(key, {
+    status: {
+      property: "power",
+      path: `${endpoint}/6/0`,
+      values: {
+        true: { label: "on", tone: "on" },
+        false: { label: "off", tone: "off" },
       },
     },
+    power: {
+      path: `${endpoint}/6/0`,
+      commands: {
+        on: { endpoint, cluster: 6, command: "On" },
+        off: { endpoint, cluster: 6, command: "Off" },
+      },
+    },
+    ...options,
   });
+  device.set({ power: "off" }, { layer: "default", reason: "Switch idle" });
+  return device;
 }

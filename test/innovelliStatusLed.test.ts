@@ -63,7 +63,7 @@ describe("Inovelli status LED rule", () => {
     runtime.stop();
   });
 
-  it("uses 10% brightness for an off web override", async () => {
+  it("uses 10% brightness for an off override input", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     runtime.loadModules({
       devices: [
@@ -87,7 +87,7 @@ describe("Inovelli status LED rule", () => {
     ).toMatchObject({
       layer: "automation",
       output: {
-        state: { power: "on", color: "purple", level: "10%" },
+        state: { power: "on", color: "blue", level: "10%" },
       },
     });
     runtime.stop();
@@ -148,7 +148,7 @@ describe("Inovelli status LED rule", () => {
 
     runtime.setWebOverride("room.light", { power: "off" }, { reason: "test" });
     await tick();
-    runtime.clearLayer("room.light", "webOverride");
+    runtime.clearLayer("room.light", "override");
     await tick();
 
     while (provider.pendingLedCommands > 0) {

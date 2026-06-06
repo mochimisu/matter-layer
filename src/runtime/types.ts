@@ -119,6 +119,7 @@ export type RuleRegistration = {
   enabled: boolean;
   deps: Set<SourceId>;
   outputs: Set<TargetId>;
+  outputWrites: Map<TargetId, boolean>;
   lastRunAt?: number;
   lastError?: string;
 };
@@ -138,13 +139,14 @@ export type RuntimeEvent =
   | { type: "rule.run"; name: string }
   | { type: "device.event"; event: string }
   | { type: "provider.changed"; provider: ProviderName }
-  | { type: "layer.changed"; target: string; layer: LayerName; output: LayerOutput | null }
+  | { type: "layer.changed"; target: string; layer: LayerName; output: LayerOutput | null; key?: string }
   | { type: "command"; result: CommandResult }
   | { type: "matter.log"; log: MatterLogEntry };
 
 export type ProviderAdapter = {
   name: ProviderName;
   start?(runtime: Runtime): Promise<void> | void;
+  stop?(): void;
   apply?(command: DesiredCommand): Promise<CommandResult>;
   snapshot?(): unknown;
 };

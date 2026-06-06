@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { loadConfig } from "./config/config";
 import { getEpaperRenderState, parseEpaperRenderOptions, renderRoomEpaperPanelPng, renderRoomEpaperPanelSvg, type EpaperRenderOptions, type EpaperRenderState } from "./epaper";
+import { HomeAssistantProvider } from "./providers/homeAssistant/provider";
 import { MatterProvider } from "./providers/matter/provider";
 import { MatterLayerRuntime } from "./runtime/engine";
 import { loadRulesModule } from "./runtime/load";
@@ -16,7 +17,7 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 
 async function main() {
   const config = loadConfig();
-  const runtime = new MatterLayerRuntime({ dryRun: config.dryRun });
+  const runtime = new MatterLayerRuntime({ dryRun: config.dryRun, overrideDbPath: config.dbPath });
   runtime.loadModules(await loadRulesModule(config.rulesModule));
   const matterProvider = new MatterProvider({
     url: config.matterWsUrl,
@@ -25,6 +26,11 @@ async function main() {
     bindings: config.matterBindings,
   });
   runtime.registerProvider(matterProvider);
+  runtime.registerProvider(new HomeAssistantProvider({
+    url: config.haWsUrl,
+    token: config.haToken,
+    enabled: config.haEnabled,
+  }));
   await runtime.start();
 
   const app = express();
@@ -40,6 +46,11 @@ async function main() {
         enabled: config.matterEnabled,
         url: config.matterWsUrl,
         bindingCount: Object.keys(config.matterBindings).length,
+      },
+      ha: {
+        enabled: config.haEnabled,
+        url: config.haWsUrl,
+        tokenConfigured: Boolean(config.haToken),
       },
       counts: {
         sources: runtime.sources.size,
@@ -504,6 +515,7 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
               enabled: rule.enabled,
               deps: [...rule.deps],
               outputs: [...rule.outputs],
+              outputWrites: [...rule.outputWrites.entries()].map(([target, hasOutput]) => ({ target, hasOutput })),
               lastRunAt: rule.lastRunAt,
               lastError: rule.lastError,
             },

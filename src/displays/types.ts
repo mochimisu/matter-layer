@@ -12,4 +12,5 @@ export type EpaperDisplayDefinition = {
   room: string;
   title?: string;
   stats?: EpaperStatDefinition[];
+  hiddenTargets?: string[];
 };

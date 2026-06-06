@@ -20,6 +20,7 @@ type MatterStatus = {
   resolved?: MatterResolvedBinding[];
 };
 type MatterProviderSnapshot = { name: string; status: MatterStatus | null } | undefined;
+type EpaperExpandedDep = { source: string; active: boolean };
 const epaperFontFamily = "Inter, Arial, sans-serif";
 
 export type EpaperPalette = "mono" | "grayscale" | "color";
@@ -216,14 +217,14 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
   const statCards = epaperStats(snapshot, options.display.stats ?? [], now);
   const matter = snapshot.providers.find((provider) => provider.name === "matter") as MatterProviderSnapshot;
   const bindingByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
-  const devices = visibleDeviceTargets(roomSnapshot.targets)
+  const devices = visibleDeviceTargets(roomSnapshot.targets, options.display)
     .map((target) => {
       const layer = layerByTarget.get(target.target);
       const status = deviceStatus(target, sourceById, layer);
       const binding = bindingByKey.get(target.key) ?? bindingByKey.get(target.target);
-      const health = matterHealth(matter, binding);
+      const health = deviceProviderHealth(target, matter, binding);
       return {
-        label: truncateMiddle(deviceDisplayLabel(binding?.label ?? target.key, target, options.room), 22),
+        label: truncateMiddle(deviceDisplayLabel(binding?.label ?? target.key, target, options.room), 30),
         status: status?.label ?? health.label,
         tone: status?.tone ?? health.tone,
         online: health.tone !== "bad",
@@ -232,24 +233,26 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
         detail: layer?.surfaced?.layer ?? "",
       };
     });
-  const compactDevices = devices.length > 7;
+  const compactDevices = devices.length > 9;
   const onlineDevices = compactDevices
-    ? devices.filter((device) => device.online).slice(0, 10)
-    : devices.filter((device) => device.online).slice(0, devices.some((device) => !device.online) ? 5 : 7);
+    ? devices.filter((device) => device.online).slice(0, 11)
+    : devices.filter((device) => device.online).slice(0, devices.some((device) => !device.online) ? 6 : 9);
   const offlineDevices = compactDevices
-    ? devices.filter((device) => !device.online).slice(0, 3)
+    ? devices.filter((device) => !device.online).slice(0, 4)
     : devices.filter((device) => !device.online).slice(0, 2);
   const deviceRowStep = compactDevices ? 25 : 47;
   const offlineHeaderY = 100 + onlineDevices.length * deviceRowStep + (compactDevices ? 15 : 18);
   const signalById = new Map(snapshot.signals.map((signal) => [signal.id, signal]));
+  const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, now);
   const activeFlowSources = new Set<string>();
   const activeFlowSinks = new Set<string>();
   const automations = [
     ...roomSnapshot.rules.map((rule) => {
-      const deps = uniqueLimited(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)), 8);
-      const outputs = epaperVisibleFlowOutputs(rule.outputs?.length ? rule.outputs : inferEpaperRuleOutputs(rule.name, roomSnapshot.layers), targetById);
+      const deps = uniqueEpaperDepStates(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById)), 8);
+      const outputWrites = epaperRuleOutputWrites(rule, roomSnapshot.layers);
+      const outputs = epaperVisibleFlowOutputs(outputWrites.map((write) => write.target), targetById);
       for (const dep of deps) {
-        if (epaperSourceActive(sourceById.get(dep)?.value ?? signalById.get(dep)?.value)) activeFlowSources.add(epaperFlowLabel(dep, options.room, 48));
+        if (dep.active) activeFlowSources.add(epaperFlowLabel(dep.source, options.room, 48));
       }
       for (const output of outputs) {
         if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, options.room, 48));
@@ -257,8 +260,11 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
       return {
         name: rule.name,
         enabled: rule.enabled,
-        deps: deps.map((dep) => epaperFlowLabel(dep, options.room, 48)),
+        deps: deps.map((dep) => epaperFlowLabel(dep.source, options.room, 48)),
         outputs: outputs.map((output) => epaperFlowLabel(output, options.room, 48)),
+        activeOutputs: outputWrites
+          .filter((write) => write.hasOutput && outputs.includes(write.target))
+          .map((write) => epaperFlowLabel(write.target, options.room, 48)),
         lastRunAt: rule.lastRunAt,
       };
     }),
@@ -273,6 +279,9 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
         enabled: true,
         deps: [epaperFlowLabel(action.event, options.room, 48)],
         outputs: outputs.map((output) => epaperFlowLabel(output, options.room, 48)),
+        activeOutputs: outputs
+          .filter((output) => eventActionHasEpaperOpinion(layerByTarget.get(output)))
+          .map((output) => epaperFlowLabel(output, options.room, 48)),
         lastRunAt: action.lastRunAt,
       };
     }),
@@ -361,7 +370,7 @@ function renderCompactDeviceRow(
   return `<g>
     <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${20 * scaleY}" fill="${row.bg}" stroke="${profile.foreground}" stroke-width="${1.5 * Math.min(scaleX, scaleY)}"/>
     ${renderCompactDeviceIcon(device.icon, 34, baseY + 3, row.inverted, profile, scaleX, scaleY)}
-    <text x="${snap(58 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(11 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.label, 17))}</text>
+    <text x="${snap(58 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(11 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.label, 20))}</text>
     <text x="${snap(190 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(9 * Math.min(scaleX, scaleY))}" font-weight="900">${layer ? `[${escapeXml(truncateText(layer, 17))}]` : ""}</text>
     <text x="${snap(374 * scaleX)}" y="${snap(y + 14 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 10))}</text>
   </g>`;
@@ -380,13 +389,13 @@ function renderDeviceRow(
     <rect x="${24 * scaleX}" y="${y}" width="${362 * scaleX}" height="${38 * scaleY}" fill="${row.bg}" stroke="${profile.foreground}" stroke-width="${2 * Math.min(scaleX, scaleY)}"/>
     <rect x="${24 * scaleX}" y="${y}" width="${9 * scaleX}" height="${38 * scaleY}" fill="${device.layer ? profile.accent : "url(#epaper-hatch)"}"/>
     ${renderDeviceIcon(device.icon, 43, baseY + 8, row.inverted, profile, scaleX, scaleY)}
-    <text x="${snap(70 * scaleX)}" y="${snap(y + 16 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(device.label)}</text>
+    <text x="${snap(70 * scaleX)}" y="${snap(y + 16 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.label, 28))}</text>
     <text x="${snap(70 * scaleX)}" y="${snap(y + 31 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(10 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(truncateText(device.layer || "no active layer", 33))}</text>
     <text x="${snap(374 * scaleX)}" y="${snap(y + 17 * scaleY)}" fill="${row.fg}" font-family="${epaperFontFamily}" font-size="${snap(12 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">${escapeXml(truncateText(device.status.toUpperCase(), 11))}</text>
   </g>`;
 }
 
-type EpaperDeviceIconKind = "light" | "blind" | "presence" | "door" | "generic";
+type EpaperDeviceIconKind = "light-on" | "light-off" | "light" | "blind" | "presence" | "door" | "generic";
 
 function epaperDeviceRowColors(tone: string | undefined, profile: EpaperProfile) {
   const inverted = tone === "off";
@@ -400,7 +409,11 @@ function epaperDeviceRowColors(tone: string | undefined, profile: EpaperProfile)
 function epaperDeviceIconKind(target: SnapshotTarget, status?: string): EpaperDeviceIconKind {
   const product = String(target.capabilities?.product ?? "").toLowerCase();
   if (target.capabilities?.position || target.capabilities?.commands) return "blind";
-  if (target.capabilities?.power) return "light";
+  if (target.capabilities?.power) {
+    if (status === "on") return "light-on";
+    if (status === "off") return "light-off";
+    return "light";
+  }
   if (product.includes("presence")) return "presence";
   if (status === "open" || status === "closed" || product.includes("door")) return "door";
   return "generic";
@@ -436,11 +449,14 @@ function renderDeviceIcon(
   const stroke = active ? profile.inverseText : profile.foreground;
   const fill = active ? profile.inverse : profile.background;
   const common = `stroke="${stroke}" stroke-width="${1.8 * s}" stroke-linecap="round" stroke-linejoin="round"`;
-  if (kind === "light") {
+  if (kind === "light" || kind === "light-on" || kind === "light-off") {
+    const rays = kind === "light-on"
+      ? `<path d="M ${x + 3 * scaleX} ${y + 2 * scaleY} l ${-2 * scaleX} ${-2 * scaleY} M ${x + 11 * scaleX} ${y + 2 * scaleY} l ${2 * scaleX} ${-2 * scaleY} M ${x + 7 * scaleX} ${y} v ${-3 * scaleY}"/>`
+      : "";
     return `<g ${common} fill="none">
       <path d="M ${x + 7 * scaleX} ${y + 4 * scaleY} a ${6 * scaleX} ${6 * scaleY} 0 0 1 ${4 * scaleX} ${10 * scaleY} c ${-1 * scaleX} ${1 * scaleY} ${-1.5 * scaleX} ${2 * scaleY} ${-1.5 * scaleX} ${3 * scaleY} h ${-5 * scaleX} c 0 ${-1 * scaleY} ${-0.5 * scaleX} ${-2 * scaleY} ${-1.5 * scaleX} ${-3 * scaleY} a ${6 * scaleX} ${6 * scaleY} 0 0 1 ${4 * scaleX} ${-10 * scaleY}"/>
       <path d="M ${x + 4.5 * scaleX} ${y + 19 * scaleY} h ${5 * scaleX}"/>
-      <path d="M ${x + 3 * scaleX} ${y + 2 * scaleY} l ${-2 * scaleX} ${-2 * scaleY} M ${x + 11 * scaleX} ${y + 2 * scaleY} l ${2 * scaleX} ${-2 * scaleY} M ${x + 7 * scaleX} ${y} v ${-3 * scaleY}"/>
+      ${rays}
     </g>`;
   }
   if (kind === "blind") {
@@ -486,11 +502,14 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
   const edgeSvg = flow.edges.map((edge) => {
     const fromY = (edge.from.y + edge.from.h / 2 + edge.sourceOffset) * scaleY;
     const toY = (edge.to.y + edge.to.h / 2 + edge.sinkOffset) * scaleY;
-    const dash = edge.enabled ? "" : ` stroke-dasharray="${5 * scaleX} ${4 * scaleX}"`;
+    const dash = !edge.enabled && profile.palette === "mono"
+      ? ` stroke-dasharray="${1.2 * scaleX} ${4 * scaleX}"`
+      : "";
     const d = epaperCurvedPath((edge.from.x + edge.from.w) * scaleX, fromY, edge.laneX * scaleX, edge.to.x * scaleX, toY, scaleX, scaleY);
+    const stroke = edge.enabled ? profile.foreground : "#666666";
     return `<g>
       <path d="${d}" fill="none" stroke="${profile.background}" stroke-width="${6 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="${d}" fill="none" stroke="${profile.foreground}" stroke-width="${2 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>
+      <path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="1" stroke-width="${2 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>
     </g>`;
   }).join("\n    ");
   const nodeSvg = [...flow.sources, ...flow.sinks].map((node) => {
@@ -509,7 +528,7 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
 }
 
 function buildEpaperFlow(
-  automations: Array<{ enabled: boolean; deps: string[]; outputs: string[] }>,
+  automations: Array<{ enabled: boolean; deps: string[]; outputs: string[]; activeOutputs?: string[] }>,
   activeSources = new Set<string>(),
   activeSinks = new Set<string>(),
   yStart = 100,
@@ -545,17 +564,20 @@ function buildEpaperFlow(
       automation.outputs.map((output) => ({
         sourceLabel: dep,
         sinkLabel: output,
-        enabled: automation.enabled,
+        enabled: automation.enabled
+          && activeSources.has(dep)
+          && (automation.activeOutputs ? automation.activeOutputs.includes(output) : true),
       })),
     ),
   );
   const deduped = prioritizeEpaperEdges(uniqueEdges(rawEdges), sinkIds, 14);
-  const resolvedEdges = uniqueResolvedEpaperEdges(deduped.flatMap((edge) => {
+  const resolvedEdges = sortEpaperResolvedEdges(uniqueResolvedEpaperEdges(deduped.flatMap((edge) => {
     const from = sourceByLabel.get(edge.sourceLabel);
     const to = sinkByLabel.get(edge.sinkLabel);
     if (!from || !to) return [];
     return [{ ...edge, from, to }];
-  }));
+  })));
+  const edgeSlots = epaperResolvedEdgeSlots(resolvedEdges);
   return {
     sources,
     sinks,
@@ -564,8 +586,8 @@ function buildEpaperFlow(
         from: edge.from,
         to: edge.to,
         laneX: 552 + (index % 7) * 5,
-        sourceOffset: portOffset(indexForResolvedEdgeNode(resolvedEdges, edge.from.id, "from", index), countResolvedEdgesForNode(resolvedEdges, edge.from.id, "from")),
-        sinkOffset: portOffset(indexForResolvedEdgeNode(resolvedEdges, edge.to.id, "to", index), countResolvedEdgesForNode(resolvedEdges, edge.to.id, "to")),
+        sourceOffset: portOffset(edgeSlots.fromIndex.get(edge) ?? 0, edgeSlots.fromCount.get(edge.from.id) ?? 1),
+        sinkOffset: portOffset(edgeSlots.toIndex.get(edge) ?? 0, edgeSlots.toCount.get(edge.to.id) ?? 1),
         enabled: edge.enabled,
     })),
   };
@@ -590,12 +612,45 @@ function epaperSourceActive(value: unknown) {
   return false;
 }
 
-function expandEpaperSourceDeps(dep: string, signalById: Map<string, Snapshot["signals"][number]>, seen = new Set<string>()): string[] {
+function expandEpaperSourceDeps(
+  dep: string,
+  signalById: Map<string, Snapshot["signals"][number]>,
+  sourceById: Map<string, SnapshotSource>,
+  transitiveDepActiveById = new Map<string, boolean>(),
+  seen = new Set<string>(),
+): EpaperExpandedDep[] {
   if (dep === "time.tick" || seen.has(dep)) return [];
   const signal = signalById.get(dep);
-  if (!signal) return dep.startsWith("signal.") ? [] : [dep];
+  if (!signal) {
+    return sourceById.has(dep)
+      ? [{ source: dep, active: epaperSourceActive(sourceById.get(dep)?.value) }]
+      : [];
+  }
   seen.add(dep);
-  return signal.deps.flatMap((signalDep) => expandEpaperSourceDeps(signalDep, signalById, seen));
+  const gateStates = signal.deps
+    .filter((signalDep) => !signalById.has(signalDep) && !sourceById.has(signalDep) && signalDep !== "time.tick")
+    .map((signalDep) => transitiveDepActiveById.get(signalDep))
+    .filter((active): active is boolean => typeof active === "boolean");
+  const gateActive = gateStates.length ? gateStates.some(Boolean) : true;
+  return signal.deps.flatMap((signalDep) =>
+    expandEpaperSourceDeps(signalDep, signalById, sourceById, transitiveDepActiveById, new Set(seen))
+      .map((expanded) => ({ ...expanded, active: expanded.active && gateActive })),
+  );
+}
+
+function uniqueEpaperDepStates(values: EpaperExpandedDep[], limit: number): EpaperExpandedDep[] {
+  const activeBySource = new Map<string, boolean>();
+  for (const value of values) {
+    activeBySource.set(value.source, Boolean(activeBySource.get(value.source)) || value.active);
+  }
+  return [...activeBySource.entries()].slice(0, limit).map(([source, active]) => ({ source, active }));
+}
+
+function epaperTransitiveDepActivity(snapshot: Snapshot, now: number) {
+  return new Map((snapshot.pulses ?? []).map((pulse) => [
+    pulse.source,
+    now < pulse.lastTriggeredAt + pulse.duration,
+  ]));
 }
 
 function inferEpaperRuleOutputs(ruleName: string, layers: Snapshot["layers"]) {
@@ -607,6 +662,34 @@ function inferEpaperRuleOutputs(ruleName: string, layers: Snapshot["layers"]) {
   });
   if (matched.length) return matched;
   return layers.flatMap((layer) => layer.surfaced?.layer === "automation" ? [layer.target] : []);
+}
+
+function epaperRuleOutputWrites(rule: Snapshot["rules"][number], layers: Snapshot["layers"]) {
+  const writes = "outputWrites" in rule && Array.isArray(rule.outputWrites)
+    ? rule.outputWrites as Array<{ target: string; hasOutput: boolean }>
+    : [];
+  if (writes.length) return writes;
+  const outputs = rule.outputs?.length ? rule.outputs : inferEpaperRuleOutputs(rule.name, layers);
+  return outputs.map((target) => ({
+    target,
+    hasOutput: ruleHasEpaperAutomationOpinion(rule.name, layers.find((layer) => layer.target === target)),
+  }));
+}
+
+function ruleHasEpaperAutomationOpinion(ruleName: string, layer: SnapshotLayer | undefined) {
+  const automationLayer = layer?.layers?.find((item) => item.layer === "automation");
+  if (!automationLayer) return layer?.surfaced?.layer === "automation" && layer.surfaced.output.state !== null;
+  if (automationLayer.items?.length) {
+    return automationLayer.items.some((item) => item.key === ruleName || item.output.writer === ruleName);
+  }
+  return automationLayer.output.writer === ruleName || automationLayer.output.reason === ruleName;
+}
+
+function eventActionHasEpaperOpinion(layer: SnapshotLayer | undefined) {
+  return Boolean(
+    layer?.layers?.some((item) => item.layer !== "automation" && item.layer !== "default")
+    || (layer?.surfaced && layer.surfaced.layer !== "automation" && layer.surfaced.layer !== "default"),
+  );
 }
 
 function epaperVisibleFlowOutputs(outputs: string[], targetById: Map<string, SnapshotTarget>) {
@@ -650,8 +733,9 @@ function compareEpaperSourcePriority(left: string, right: string) {
 function epaperSourcePriority(label: string) {
   const lower = label.toLowerCase();
   if (lower.includes(".paddle.") || lower.includes(".button.")) return 0;
-  if (lower.endsWith(".activelayer")) return 1;
-  return 2;
+  if (lower.endsWith(".presence") || lower.endsWith(".open") || lower.includes(".door.")) return 1;
+  if (lower.endsWith(".activelayer")) return 2;
+  return 3;
 }
 
 function groupEpaperSourceLabels(labels: string[], activeSources: Set<string>) {
@@ -767,6 +851,47 @@ function uniqueResolvedEpaperEdges(edges: Array<{ sourceLabel: string; sinkLabel
   return [...seen.values()];
 }
 
+function sortEpaperResolvedEdges(edges: Array<{ sourceLabel: string; sinkLabel: string; enabled: boolean; from: EpaperFlowNode; to: EpaperFlowNode }>) {
+  return [...edges].sort((left, right) =>
+    (left.from.y + left.from.h / 2) - (right.from.y + right.from.h / 2)
+    || (left.to.y + left.to.h / 2) - (right.to.y + right.to.h / 2)
+    || left.sourceLabel.localeCompare(right.sourceLabel)
+    || left.sinkLabel.localeCompare(right.sinkLabel),
+  );
+}
+
+function epaperResolvedEdgeSlots(edges: Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>) {
+  const byFrom = new Map<string, Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>>();
+  const byTo = new Map<string, Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>>();
+  for (const edge of edges) {
+    const fromList = byFrom.get(edge.from.id) ?? [];
+    fromList.push(edge);
+    byFrom.set(edge.from.id, fromList);
+    const toList = byTo.get(edge.to.id) ?? [];
+    toList.push(edge);
+    byTo.set(edge.to.id, toList);
+  }
+  for (const list of byFrom.values()) {
+    list.sort((left, right) => (left.to.y + left.to.h / 2) - (right.to.y + right.to.h / 2));
+  }
+  for (const list of byTo.values()) {
+    list.sort((left, right) => (left.from.y + left.from.h / 2) - (right.from.y + right.from.h / 2));
+  }
+  const fromIndex = new Map<(typeof edges)[number], number>();
+  const toIndex = new Map<(typeof edges)[number], number>();
+  const fromCount = new Map<string, number>();
+  const toCount = new Map<string, number>();
+  for (const [id, list] of byFrom) {
+    fromCount.set(id, list.length);
+    list.forEach((edge, index) => fromIndex.set(edge, index));
+  }
+  for (const [id, list] of byTo) {
+    toCount.set(id, list.length);
+    list.forEach((edge, index) => toIndex.set(edge, index));
+  }
+  return { fromIndex, fromCount, toIndex, toCount };
+}
+
 function countResolvedEdgesForNode(edges: Array<{ from: EpaperFlowNode; to: EpaperFlowNode }>, nodeId: string, key: "from" | "to") {
   return edges.filter((edge) => edge[key].id === nodeId).length;
 }
@@ -817,13 +942,14 @@ function epaperRenderFingerprint(
   const roomSnapshot = filterSnapshot(snapshot, options.room);
   const sourceById = new Map(roomSnapshot.sources.map((source) => [source.source, source]));
   const signalById = new Map(snapshot.signals.map((signal) => [signal.id, signal]));
+  const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, now);
   const layerByTarget = new Map(roomSnapshot.layers.map((layer) => [layer.target, layer]));
   const matter = snapshot.providers.find((provider) => provider.name === "matter") as MatterProviderSnapshot;
   const bindingByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
   const statCards = epaperStats(snapshot, options.display.stats ?? [], now);
   return stableStringify({
     stats: statCards,
-    devices: visibleDeviceTargets(roomSnapshot.targets).map((target) => {
+    devices: visibleDeviceTargets(roomSnapshot.targets, options.display).map((target) => {
       const layer = layerByTarget.get(target.target);
       const binding = bindingByKey.get(target.key) ?? bindingByKey.get(target.target);
       return {
@@ -841,7 +967,10 @@ function epaperRenderFingerprint(
       enabled: rule.enabled,
       deps: rule.deps,
       outputs: rule.outputs,
-      depValues: rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)).map((dep) => [dep, sourceById.get(dep)?.value ?? signalById.get(dep)?.value]),
+      outputWrites: "outputWrites" in rule ? rule.outputWrites : undefined,
+      depValues: rule.deps
+        .flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById))
+        .map((dep) => [dep.source, sourceById.get(dep.source)?.value ?? signalById.get(dep.source)?.value, dep.active]),
     })),
     events: (roomSnapshot.eventActions ?? []).map((action) => ({
       name: action.name,
@@ -972,8 +1101,9 @@ function filterSnapshot(snapshot: Snapshot, room: string) {
   };
 }
 
-function visibleDeviceTargets(targets: Snapshot["targets"]) {
-  return targets.filter((target) => !target.target.includes(".endpoint.") && !target.target.endsWith(".statusLed"));
+function visibleDeviceTargets(targets: Snapshot["targets"], display?: EpaperDisplayDefinition) {
+  const hiddenTargets = new Set(display?.hiddenTargets ?? []);
+  return targets.filter((target) => !hiddenTargets.has(target.target) && !target.target.includes(".endpoint.") && !target.target.endsWith(".statusLed"));
 }
 
 function roomOf(id: string) {
@@ -1073,6 +1203,10 @@ function matterHealth(matter: MatterProviderSnapshot, binding: MatterResolvedBin
   if (binding.available === true) return { label: "online", tone: "ok" };
   if (binding.available === false) return { label: "offline", tone: "bad" };
   return { label: "unknown", tone: "muted" };
+}
+
+function deviceProviderHealth(target: SnapshotTarget, matter: MatterProviderSnapshot, binding: MatterResolvedBinding | undefined) {
+  return target.provider === "matter" ? matterHealth(matter, binding) : { label: target.provider, tone: "ok" };
 }
 
 function matterProviderHealth(status: MatterStatus | null | undefined, now: number) {

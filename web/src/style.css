@@ -190,6 +190,10 @@ button {
     @apply overflow-hidden border-0 bg-transparent shadow-none;
   }
 
+  .device-layout {
+    @apply grid gap-3;
+  }
+
   .device-room::before {
     display: none;
   }
@@ -323,6 +327,15 @@ button {
     @apply min-w-max;
   }
 
+  .device-detail-link {
+    @apply min-w-max text-left outline-none;
+  }
+
+  .device-detail-link:focus-visible,
+  .device-detail-link[aria-current="true"] {
+    @apply text-gaia-green;
+  }
+
   .device-name-cell {
     @apply min-w-max;
   }
@@ -413,6 +426,46 @@ button {
 
   .device-name-tooltip-offline {
     @apply font-black uppercase text-[#c94f3d];
+  }
+
+  .device-detail-panel {
+    @apply overflow-hidden;
+  }
+
+  .device-detail-body {
+    @apply grid gap-3 p-3 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)];
+  }
+
+  .device-detail-summary {
+    @apply grid content-start gap-2;
+  }
+
+  .device-detail-code {
+    @apply block min-w-0 overflow-x-auto border border-gaia-line bg-gaia-paper px-2 py-1 text-xs font-bold text-gaia-ink;
+  }
+
+  .device-stack {
+    @apply grid gap-2;
+  }
+
+  .device-stack-layer {
+    @apply border border-gaia-line bg-white;
+  }
+
+  .device-stack-layer-head {
+    @apply flex items-center justify-between gap-3 border-b border-gaia-line bg-gaia-paper px-2 py-1.5;
+  }
+
+  .device-stack-items {
+    @apply grid gap-px bg-gaia-line;
+  }
+
+  .device-stack-item {
+    @apply grid grid-cols-[minmax(7rem,0.8fr)_minmax(8rem,1fr)_minmax(10rem,1.2fr)] gap-2 bg-white px-2 py-1.5 text-xs;
+  }
+
+  .device-stack-item code {
+    @apply min-w-0 overflow-x-auto whitespace-nowrap text-gaia-ink;
   }
 
   .matter-log-table {

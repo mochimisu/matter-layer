@@ -78,6 +78,11 @@ in {
             default = null;
             description = "Matter NodeLabel used to resolve this logical device key.";
           };
+          unique_id = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Optional Matter BasicInformation UniqueID used to resolve this logical device key.";
+          };
           mac = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
@@ -87,6 +92,12 @@ in {
       });
       default = {};
       description = "Logical device key to Matter identity bindings.";
+    };
+
+    dbPath = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/matter-layer/matter-layer.sqlite";
+      description = "SQLite path used to persist manual override layer input.";
     };
 
     environment = lib.mkOption {
@@ -127,6 +138,7 @@ in {
           MATTER_LAYER_MATTER_ENABLED = if cfg.matterEnabled then "1" else "0";
           MATTER_LAYER_DRY_RUN = if cfg.dryRun then "1" else "0";
           MATTER_LAYER_BINDINGS_FILE = bindingsFile;
+          MATTER_LAYER_DB_PATH = cfg.dbPath;
         }
         // lib.optionalAttrs (cfg.rulesModule != null) {
           MATTER_LAYER_RULES_MODULE = toString cfg.rulesModule;

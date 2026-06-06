@@ -17,6 +17,12 @@ import "./style.css";
 type AppTab = "devices" | "details" | "graph" | "log" | "epaper";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
 type DeviceStatus = { label: string; tone?: string; icon?: ReactNode; since?: number };
+type EpaperRenderEvent = {
+  type: "epaper.snapshot" | "epaper.update";
+  display: string;
+  generatedAt: number;
+  url: string;
+};
 const epaperStatValueCache = new Map<string, { value: string; updatedAt: number }>();
 const epaperPreviewRenderCache = new Map<string, { fingerprint: string; generatedAt: number }>();
 
@@ -48,6 +54,14 @@ function logAutomationFromLocation() {
   return new URLSearchParams(location.search).get("automation") ?? "all";
 }
 
+function deviceFromLocation() {
+  const detailPrefix = "/details/";
+  if (location.pathname.startsWith(detailPrefix)) {
+    return decodeURIComponent(location.pathname.slice(detailPrefix.length));
+  }
+  return new URLSearchParams(location.search).get("deviceDetail");
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -56,6 +70,7 @@ function App() {
   const [roomFilter, setRoomFilter] = useState(() => roomFromLocation());
   const [logDeviceFilter, setLogDeviceFilter] = useState(() => logDeviceFromLocation());
   const [logAutomationFilter, setLogAutomationFilter] = useState(() => logAutomationFromLocation());
+  const [selectedDevice, setSelectedDevice] = useState<string | null>(() => deviceFromLocation());
   const [now, setNow] = useState(() => Date.now());
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
 
@@ -145,9 +160,24 @@ function App() {
     return () => document.removeEventListener("visibilitychange", syncVisibility);
   }, []);
 
+  useEffect(() => {
+    function syncLocation() {
+      setTab(tabFromLocation());
+      setRoomFilter(roomFromLocation());
+      setLogDeviceFilter(logDeviceFromLocation());
+      setLogAutomationFilter(logAutomationFromLocation());
+      setSelectedDevice(deviceFromLocation());
+    }
+    window.addEventListener("popstate", syncLocation);
+    return () => window.removeEventListener("popstate", syncLocation);
+  }, []);
+
   function selectTab(next: AppTab) {
     setTab(next);
+    setSelectedDevice(null);
     const url = new URL(location.href);
+    url.pathname = "/";
+    url.searchParams.delete("deviceDetail");
     if (next === "devices") {
       url.searchParams.delete("tab");
     } else {
@@ -185,6 +215,19 @@ function App() {
       url.searchParams.delete("automation");
     } else {
       url.searchParams.set("automation", next);
+    }
+    history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function selectDeviceDetail(next: string | null) {
+    setSelectedDevice(next);
+    const url = new URL(location.href);
+    url.searchParams.delete("deviceDetail");
+    if (next) {
+      url.pathname = `/details/${encodeURIComponent(next)}`;
+      url.searchParams.delete("tab");
+    } else {
+      url.pathname = "/";
     }
     history.pushState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
@@ -501,10 +544,11 @@ function App() {
             </>
           ) : tab === "devices" ? (
             <DevicesOverview
-              snapshot={visibleSnapshot}
+              snapshot={selectedDevice ? snapshot : visibleSnapshot}
               matter={matter}
               now={now}
               busy={busy}
+              selectedDevice={selectedDevice}
               onSetOverride={setOverride}
               onSetSource={setSource}
               onClearOverride={clearOverride}
@@ -512,6 +556,7 @@ function App() {
               onDispatchEvent={dispatchDeviceEvent}
               onPingDevice={pingDevice}
               onProbeDevice={probeDevice}
+              onSelectDevice={selectDeviceDetail}
               deviceOpResults={deviceOpResults}
             />
           ) : tab === "log" ? (
@@ -874,12 +919,15 @@ function DevicesOverview({
   onDispatchEvent,
   onPingDevice,
   onProbeDevice,
+  selectedDevice,
+  onSelectDevice,
   deviceOpResults,
 }: {
   snapshot: Snapshot | null;
   matter: Snapshot["providers"][number] | undefined;
   now: number;
   busy: string | null;
+  selectedDevice: string | null;
   onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>;
   onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>;
   onClearOverride: (target: string) => Promise<void>;
@@ -887,13 +935,25 @@ function DevicesOverview({
   onDispatchEvent: (event: string) => Promise<void>;
   onPingDevice: (target: string) => Promise<void>;
   onProbeDevice: (target: string) => Promise<void>;
+  onSelectDevice: (target: string | null) => void;
   deviceOpResults: Record<string, DeviceOpResult>;
 }) {
   const layersByTarget = new Map((snapshot?.layers ?? []).map((layer) => [layer.target, layer]));
   const sourceById = new Map((snapshot?.sources ?? []).map((source) => [source.source, source]));
   const resolvedByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
   const rooms = groupTargetsByRoom(snapshot?.targets ?? []);
+  const selectedTarget = (snapshot?.targets ?? []).find((target) => target.target === selectedDevice) ?? null;
   let deviceRowIndex = 0;
+  if (selectedTarget) {
+    return (
+      <DeviceDetail
+        target={selectedTarget}
+        layer={layersByTarget.get(selectedTarget.target)}
+        sourceById={sourceById}
+        onClose={() => onSelectDevice(null)}
+      />
+    );
+  }
   return (
     <section className="gaia-panel device-room">
       <div className="device-table">
@@ -913,7 +973,7 @@ function DevicesOverview({
               const binding = resolvedByKey.get(target.key) ?? resolvedByKey.get(target.target);
               const layer = layersByTarget.get(target.target);
               const status = deviceStatus(target, sourceById, layer);
-              const health = matterHealth(matter, binding);
+              const health = deviceProviderHealth(target, matter, binding);
               const battery = deviceBattery(target, sourceById);
               const rssi = deviceRssi(target, sourceById, binding);
               const metrics = deviceMetrics(target, sourceById);
@@ -921,7 +981,7 @@ function DevicesOverview({
               const lastProbeAt = binding?.lastProbeAt;
               const vendor = String(target.capabilities?.vendor ?? "");
               const product = String(target.capabilities?.product ?? "");
-              const label = binding?.label || target.key;
+              const label = deviceResolvedLabel(target, binding?.label);
               const displayLabel = deviceDisplayLabel(label, target, room);
               const deviceInfo = [label, target.key, [vendor, product].filter(Boolean).join(" ")].filter(Boolean);
               const reason = layer?.surfaced?.output.reason ?? (layer?.surfaced ? formatValue(layer.surfaced.output.state) : "");
@@ -931,7 +991,13 @@ function DevicesOverview({
                 <article key={target.target} className={rowClass}>
                   <span>{status ? <DeviceStatusPill status={status} now={now} /> : null}</span>
                   <span className="device-name-with-health">
-                    <DeviceName label={displayLabel} details={deviceInfo} offline={health.tone === "bad"} offlineSince={health.offlineSince} />
+                    <button
+                      className="device-detail-link"
+                      onClick={() => onSelectDevice(target.target)}
+                      aria-current={selectedDevice === target.target ? "true" : undefined}
+                    >
+                      <DeviceName label={displayLabel} details={deviceInfo} offline={health.tone === "bad"} offlineSince={health.offlineSince} />
+                    </button>
                   </span>
                   <span><LayerBadge layer={layer?.surfaced?.layer} /></span>
                   <span className="min-w-0 truncate text-xs text-gaia-muted">{reason}</span>
@@ -986,11 +1052,65 @@ function DevicesOverview({
   );
 }
 
+function DeviceDetail({
+  target,
+  layer,
+  sourceById,
+  onClose,
+}: {
+  target: Snapshot["targets"][number];
+  layer?: Snapshot["layers"][number];
+  sourceById: Map<string, Snapshot["sources"][number]>;
+  onClose: () => void;
+}) {
+  const status = deviceStatus(target, sourceById, layer);
+  return (
+    <section className="gaia-panel device-detail-panel">
+      <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
+        <div className="min-w-0">
+          <h2 className="gaia-title truncate">{target.key}</h2>
+          <div className="truncate text-xs font-bold text-gaia-muted">{target.target}</div>
+        </div>
+        <button className="gaia-button" onClick={onClose}>Back</button>
+      </div>
+      <div className="device-detail-body">
+        <div className="device-detail-summary">
+          <div>{status ? <DeviceStatusPill status={status} now={Date.now()} /> : <span className="gaia-chip">No status</span>}</div>
+          <LayerBadge layer={layer?.surfaced?.layer} />
+          <code className="device-detail-code">{formatValue(layer?.surfaced?.output.state ?? null)}</code>
+        </div>
+        <div className="device-stack">
+          {(layer?.layers ?? []).length ? layer!.layers.map((bucket) => (
+            <div key={bucket.layer} className="device-stack-layer">
+              <div className="device-stack-layer-head">
+                <LayerBadge layer={bucket.layer} />
+                <span className="truncate text-xs font-bold text-gaia-muted">{bucket.output.reason ?? bucket.output.writer ?? formatValue(bucket.output.state)}</span>
+              </div>
+              <code className="device-detail-code">{formatValue(bucket.output.state)}</code>
+              <div className="device-stack-items">
+                {(bucket.items ?? [{ key: bucket.layer, output: bucket.output, since: bucket.since }]).map((item) => (
+                  <div key={item.key} className="device-stack-item">
+                    <span className="truncate font-black">{item.key}</span>
+                    <span className="truncate text-gaia-muted">{item.output.reason ?? item.output.writer ?? "opinion"}</span>
+                    <code>{formatValue(item.output.state)}</code>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )) : (
+            <div className="gaia-row text-sm font-bold text-gaia-muted">No active layer opinions.</div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function roomAvailability(targets: Snapshot["targets"], resolvedByKey: Map<string, MatterResolvedBinding>) {
   let available = 0;
   for (const target of targets) {
     const binding = resolvedByKey.get(target.key) ?? resolvedByKey.get(target.target);
-    if (binding?.available === true) available += 1;
+    if (target.provider !== "matter" || binding?.available === true) available += 1;
   }
   return { available, total: targets.length };
 }
@@ -1148,7 +1268,7 @@ function EpaperPreview({ snapshot, now }: { snapshot: Snapshot | null; now: numb
     <section className="gaia-panel epaper-preview-panel">
       <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
         <h2 className="gaia-title">E-Paper Preview</h2>
-        <span className="gaia-chip">800x480 mono</span>
+        <span className="gaia-chip">800x480 grayscale</span>
       </div>
       <div className="epaper-preview-stage">
         {epaperDisplays.map((display) => (
@@ -1166,6 +1286,54 @@ function EpaperPreview({ snapshot, now }: { snapshot: Snapshot | null; now: numb
 }
 
 function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null; now: number; display: EpaperDisplayDefinition }) {
+  const fallbackGeneratedAt = floorToMinute(now);
+  const fallbackVersion = snapshot ? epaperImageVersion(snapshot, display.room, fallbackGeneratedAt) : fallbackGeneratedAt;
+  const fallbackUrl = epaperPreviewUrl(display.id, fallbackVersion);
+  const [renderState, setRenderState] = useState<{ url: string; generatedAt?: number }>(() => ({
+    url: fallbackUrl,
+  }));
+
+  useEffect(() => {
+    let active = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+    const connect = () => {
+      if (!active) return;
+      const query = new URLSearchParams({ palette: "grayscale" });
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/epaper-events/${encodeURIComponent(display.id)}?${query.toString()}`);
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data) as EpaperRenderEvent;
+          if (!active || message.display !== display.id) return;
+          setRenderState({
+            url: epaperPreviewUrlFromRenderEvent(message),
+            generatedAt: message.generatedAt,
+          });
+        } catch {}
+      };
+      ws.onclose = () => {
+        ws = null;
+        if (!active) return;
+        reconnectTimer = window.setTimeout(connect, 1000);
+      };
+    };
+    connect();
+    return () => {
+      active = false;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, [display.id]);
+
+  return (
+    <>
+      <img className="epaper-image" src={renderState.url} width="800" height="480" alt={`${display.title ?? humanRoomName(display.room)} e-paper rendered preview`} />
+      <div className="epaper-generated-at">
+        {renderState.generatedAt ? `Generated at ${formatEpaperTime(renderState.generatedAt)}` : "Waiting for renderer timestamp"}
+      </div>
+    </>
+  );
+
   const renderNow = floorToMinute(now);
   const room = display.room;
   const roomSnapshot = filterSnapshot(snapshot, room);
@@ -1179,10 +1347,10 @@ function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null
       const layer = layerByTarget.get(target.target);
       const status = deviceStatus(target, sourceById, layer);
       const binding = bindingByKey.get(target.key) ?? bindingByKey.get(target.target);
-      const health = matterHealth(matter, binding);
+      const health = deviceProviderHealth(target, matter, binding);
       return {
         target,
-        label: truncateMiddle(deviceDisplayLabel(binding?.label ?? target.key, target, room), 22),
+        label: truncateMiddle(deviceDisplayLabel(deviceResolvedLabel(target, binding?.label), target, room), 22),
         status: status?.label ?? health.label,
         tone: status?.tone ?? health.tone,
         online: health.tone !== "bad",
@@ -1810,7 +1978,7 @@ function epaperPreviewFingerprint(snapshot: Snapshot | null, display: EpaperDisp
       return {
         target: target.target,
         key: target.key,
-        label: binding?.label ?? target.key,
+        label: deviceResolvedLabel(target, binding?.label),
         available: binding?.available,
         statusSources: epaperStatusSourceIds(target).map((source) => [source, sourceById.get(source)?.value]),
         status: layer?.surfaced?.output.state,
@@ -1858,6 +2026,32 @@ function epaperStatusSourceIds(target: Snapshot["targets"][number]) {
     `${target.key}.open`,
     `${target.key}.position`,
   ].filter((source): source is string => Boolean(source));
+}
+
+function epaperImageVersion(snapshot: Snapshot, room: string, renderNow: number) {
+  const roomSnapshot = filterSnapshot(snapshot, room);
+  const latestSource = Math.max(0, ...(roomSnapshot?.sources ?? []).map((source) => source.updatedAt ?? source.since ?? 0));
+  const latestSignal = Math.max(0, ...(roomSnapshot?.signals ?? []).map((signal) => signal.lastRunAt ?? 0));
+  const latestRule = Math.max(0, ...(roomSnapshot?.rules ?? []).map((rule) => rule.lastRunAt ?? 0));
+  const latestLayer = Math.max(0, ...(roomSnapshot?.layers ?? []).map((layer) => layer.surfaced?.since ?? 0));
+  const providerStamp = Math.max(0, ...snapshot.providers.map((provider) => provider.status?.lastMessageAt ?? 0));
+  return String(Math.max(renderNow, latestSource, latestSignal, latestRule, latestLayer, providerStamp));
+}
+
+function epaperPreviewUrl(displayId: string, version: string | number) {
+  const query = new URLSearchParams({
+    palette: "grayscale",
+    v: String(version),
+  });
+  return `/api/epaper/${encodeURIComponent(displayId)}.png?${query.toString()}`;
+}
+
+function epaperPreviewUrlFromRenderEvent(message: EpaperRenderEvent) {
+  const [path, rawQuery = ""] = message.url.split("?");
+  const query = new URLSearchParams(rawQuery);
+  query.set("palette", "grayscale");
+  query.set("v", String(message.generatedAt));
+  return `${path}?${query.toString()}`;
 }
 
 function formatEpaperStatValue(stat: EpaperStatDefinition, value: unknown) {
@@ -2027,6 +2221,11 @@ function deviceDisplayLabel(label: string, target: Snapshot["targets"][number], 
   return stripRoomPrefix(label, room) || stripRoomPrefix(target.key, room) || label;
 }
 
+function deviceResolvedLabel(target: Snapshot["targets"][number], bindingLabel?: string) {
+  const displayName = target.capabilities?.displayName;
+  return typeof displayName === "string" && displayName.length > 0 ? displayName : bindingLabel || target.key;
+}
+
 function epaperFlowLabel(id: string, room: string, length: number) {
   return truncateMiddle(stripRoomPrefix(id, room), length);
 }
@@ -2058,6 +2257,15 @@ function stripPrefix(value: string, prefix: string) {
 }
 
 type MatterResolvedBinding = NonNullable<NonNullable<Snapshot["providers"][number]["status"]>["resolved"]>[number];
+
+function deviceProviderHealth(
+  target: Snapshot["targets"][number],
+  matter: Snapshot["providers"][number] | undefined,
+  binding: MatterResolvedBinding | undefined,
+) {
+  if (target.provider !== "matter") return { label: target.provider, tone: "ok" };
+  return matterHealth(matter, binding);
+}
 
 function matterHealth(matter: Snapshot["providers"][number] | undefined, binding: MatterResolvedBinding | undefined) {
   if (matter?.status?.enabled === false) return { label: "disabled", tone: "muted" };

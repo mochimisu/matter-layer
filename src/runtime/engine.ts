@@ -15,6 +15,7 @@ import { clockSource } from "./builtins";
 import { setSchedulerRuntime } from "./scheduler";
 import { parseDuration } from "./state";
 import { pulseSnapshot } from "./state";
+import { OverridePersistence } from "./overridePersistence";
 import type {
   CommandResult,
   DesiredCommand,
@@ -51,11 +52,17 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   private nextMatterLogId = 0;
   private clock?: NodeJS.Timeout;
   private activeRule?: string;
+  private overridePersistence?: OverridePersistence;
+  private restoringOverrides = false;
+  private started = false;
 
-  constructor(readonly options: { dryRun?: boolean } = {}) {
+  constructor(readonly options: { dryRun?: boolean; overrideDbPath?: string | null } = {}) {
     this.registerSource(clockSource);
     clockSource.update(Date.now(), Date.now());
     setSchedulerRuntime(this);
+    if (options.overrideDbPath) {
+      this.overridePersistence = new OverridePersistence(options.overrideDbPath);
+    }
   }
 
   registerProvider(provider: ProviderAdapter) {
@@ -109,18 +116,21 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     });
   }
 
-  recordRuleOutput(target: string) {
+  recordRuleOutput(target: string, hasOutput: boolean) {
     if (!this.activeRule) {
       return;
     }
-    this.rules.get(this.activeRule)?.outputs.add(target);
+    const rule = this.rules.get(this.activeRule);
+    rule?.outputs.add(target);
+    rule?.outputWrites.set(target, hasOutput);
   }
 
-  writeLayer(target: string, layer: LayerName, output: LayerOutput | null) {
+  writeLayer(target: string, layer: LayerName, output: LayerOutput | null, key?: string) {
     const before = this.layerFingerprint(target);
-    this.layers.write(target, layer, output);
+    this.layers.write(target, layer, output, key);
     if (before !== this.layerFingerprint(target)) {
-      this.emit({ type: "layer.changed", target, layer, output });
+      this.persistOverrideLayer(target, layer);
+      this.emit({ type: "layer.changed", target, layer, output, key });
       this.updateActiveLayerSource(target);
     }
     if (output?.expiresAt) {
@@ -128,18 +138,19 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     }
   }
 
-  clearLayer(target: string, layer: LayerName) {
+  clearLayer(target: string, layer: LayerName, key?: string) {
     const before = this.layerFingerprint(target);
-    this.layers.clear(target, layer);
+    this.layers.clear(target, layer, key);
     if (before !== this.layerFingerprint(target)) {
-      this.emit({ type: "layer.changed", target, layer, output: null });
+      this.persistOverrideLayer(target, layer);
+      this.emit({ type: "layer.changed", target, layer, output: null, key });
       this.updateActiveLayerSource(target);
     }
     this.enqueueApply(target);
   }
 
-  hasLayer(target: string, layer: LayerName) {
-    return Boolean(this.layers.layer(target, layer));
+  hasLayer(target: string, layer: LayerName, key?: string) {
+    return Boolean(this.layers.layer(target, layer, key));
   }
 
   surfaceLayer(target: string) {
@@ -147,8 +158,18 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   }
 
   enqueueApply(target: string) {
+    if (!this.started) {
+      return;
+    }
     const command = this.layers.desiredCommand(target);
-    if (!command || !this.layers.shouldApply(command)) {
+    if (!command) {
+      return;
+    }
+    if (this.commandMatchesObserved(command)) {
+      this.layers.shouldApply(command);
+      return;
+    }
+    if (!this.layers.shouldApply(command)) {
       return;
     }
     this.queueCommand(command);
@@ -262,7 +283,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     for (const provider of this.providers.values()) {
       await provider.start?.(this);
     }
+    this.restoreOverrides();
+    this.started = true;
     this.runAll();
+    for (const target of this.layers.snapshot().filter((layer) => layer.layers.some((item) => item.layer === "override")).map((layer) => layer.target)) {
+      this.enqueueApply(target);
+    }
   }
 
   stop() {
@@ -274,6 +300,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       clearTimeout(timeout);
     }
     this.scheduled.clear();
+    this.started = false;
+    for (const provider of this.providers.values()) {
+      provider.stop?.();
+    }
+    this.overridePersistence?.close();
+    this.overridePersistence = undefined;
     setSchedulerRuntime(null);
   }
 
@@ -328,8 +360,9 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     try {
       this.activeRule = rule.name;
       rule.outputs.clear();
+      rule.outputWrites.clear();
       setActiveRuleName(rule.name);
-      const result = track(rule.run);
+      const result = track(rule.run, rule.name);
       rule.deps = result.deps;
       rule.lastRunAt = Date.now();
       rule.lastError = undefined;
@@ -357,7 +390,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
 
   setWebOverride(target: string, state: Record<string, unknown> | null, options: { reason?: string; ttl?: string } = {}) {
     const expiresAt = options.ttl ? Date.now() + parseDuration(options.ttl) : undefined;
-    this.writeLayer(target, "webOverride", {
+    this.writeLayer(target, "override", {
       state,
       reason: options.reason ?? "Web override",
       writer: "web",
@@ -411,7 +444,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     }
     const timeout = setTimeout(() => {
       this.scheduled.delete(reason);
-      if (reason.startsWith("pulse.")) {
+      if (reason.startsWith("pulse.") || reason.startsWith("wasTrueFor.") || reason.startsWith("holdTrue.")) {
         this.updateSource({
           source: reason,
           value: Date.now(),
@@ -492,6 +525,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         enabled: rule.enabled,
         deps: [...rule.deps],
         outputs: [...rule.outputs],
+        outputWrites: [...rule.outputWrites.entries()].map(([target, hasOutput]) => ({ target, hasOutput })),
         lastRunAt: rule.lastRunAt,
         lastError: rule.lastError,
       })),
@@ -609,7 +643,9 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         ? {
             layer: surfaced.layer,
             state: surfaced.output.state,
-            power: surfaced.output.state?.power,
+            power: surfaced.output.state && typeof surfaced.output.state === "object" && !Array.isArray(surfaced.output.state)
+              ? (surfaced.output.state as Record<string, unknown>).power
+              : undefined,
             reason: surfaced.output.reason,
           }
         : null,
@@ -654,6 +690,9 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     for (const target of this.targets.keys()) {
       const expired = this.layers.expire(target, Date.now());
       if (expired.length > 0) {
+        if (expired.includes("override")) {
+          this.persistOverrideLayer(target, "override");
+        }
         for (const layer of expired) {
           this.emit({ type: "layer.changed", target, layer, output: null });
         }
@@ -675,6 +714,61 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       },
     );
   }
+
+  private restoreOverrides() {
+    if (!this.overridePersistence) {
+      return;
+    }
+    this.restoringOverrides = true;
+    try {
+      for (const item of this.overridePersistence.load()) {
+        if (!this.targets.has(item.target)) {
+          continue;
+        }
+        this.layers.write(item.target, "override", item.output, item.key);
+        if (item.output.expiresAt) {
+          this.scheduleAt(item.output.expiresAt, `layer.${item.target}.override`);
+        }
+        this.updateActiveLayerSource(item.target);
+      }
+    } finally {
+      this.restoringOverrides = false;
+    }
+  }
+
+  private persistOverrideLayer(target: string, layer: LayerName) {
+    if (this.restoringOverrides || layer !== "override") {
+      return;
+    }
+    this.overridePersistence?.replaceTarget(target, this.layers.items(target, "override"));
+  }
+
+  private commandMatchesObserved(command: DesiredCommand) {
+    if (!command.state) {
+      return false;
+    }
+    const target = this.targets.get(command.target);
+    if (!target) {
+      return false;
+    }
+    for (const [property, desired] of Object.entries(command.state)) {
+      const source = this.sourceForTargetProperty(command.target, property);
+      if (!source || !observedMatchesDesired(property, desired, source.peek())) {
+        return false;
+      }
+    }
+    return Object.keys(command.state).length > 0;
+  }
+
+  private sourceForTargetProperty(target: string, property: string) {
+    const exact = this.sources.get(`${target}.${property}`);
+    if (exact) {
+      return exact;
+    }
+    const displaySource = this.targets.get(target)?.display?.status?.source;
+    const source = displaySource ? this.sources.get(displaySource) : undefined;
+    return source?.binding.property === property ? source : undefined;
+  }
 }
 
 export function sourceBindings(runtime: MatterLayerRuntime): SourceBinding[] {
@@ -683,4 +777,16 @@ export function sourceBindings(runtime: MatterLayerRuntime): SourceBinding[] {
 
 function roomOf(id: string) {
   return id.split(".")[0] ?? id;
+}
+
+function observedMatchesDesired(property: string, desired: unknown, observed: unknown) {
+  if (property === "power") {
+    if (desired === "on") return observed === true || observed === "on";
+    if (desired === "off") return observed === false || observed === "off";
+  }
+  if (property === "position") {
+    if (desired === "open" && typeof observed === "number") return observed <= 5;
+    if (desired === "closed" && typeof observed === "number") return observed >= 95;
+  }
+  return Object.is(desired, observed);
 }

@@ -5,7 +5,7 @@ function baseSnapshot(): Snapshot {
   return {
     sources: [{ source: "room.sensor.presence", key: "room.sensor", property: "presence", value: false, since: 1 }],
     signals: [{ id: "room.presence", value: false, deps: ["room.sensor.presence"], initialized: true, lastRunAt: 1 }],
-    targets: [{ target: "room.light", key: "room.light", capabilities: {} }],
+    targets: [{ target: "room.light", key: "room.light", provider: "matter", capabilities: {} }],
     rules: [{ name: "room.light", enabled: true, deps: ["room.presence"], outputs: ["room.light"], lastRunAt: 1 }],
     layers: [{ target: "room.light", layers: [], surfaced: null }],
     commands: [],

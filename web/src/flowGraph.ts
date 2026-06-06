@@ -532,16 +532,21 @@ function routeEdges(edges: FlowEdgeDefinition[], positions: Map<string, FlowNode
   }
 
   const edgesBySource = groupedEdges(edges, "from");
+  for (const list of edgesBySource.values()) {
+    list.sort((left, right) => edgeTargetY(left, positions) - edgeTargetY(right, positions) || edgePriority(left, positions.get(left.to)) - edgePriority(right, positions.get(right.to)));
+  }
+  const targetSlotByEdge = edgeSlotIndexes(edgesByTarget);
+  const sourceSlotByEdge = edgeSlotIndexes(edgesBySource);
   return edges.flatMap((edge): FlowEdgeModel[] => {
     const from = positions.get(edge.from);
     const to = positions.get(edge.to);
     if (!from || !to) return [];
 
     const targetGroup = edgesByTarget.get(edge.to) ?? [edge];
-    const targetIndex = targetGroup.indexOf(edge);
+    const targetIndex = targetSlotByEdge.get(edge) ?? targetGroup.indexOf(edge);
     const targetCount = targetGroup.length;
     const sourceGroup = edgesBySource.get(edge.from) ?? [edge];
-    const sourceIndex = sourceGroup.indexOf(edge);
+    const sourceIndex = sourceSlotByEdge.get(edge) ?? sourceGroup.indexOf(edge);
     const sourceCount = sourceGroup.length;
     const fromPort = {
       x: from.x + from.w + 8,
@@ -585,6 +590,19 @@ function groupedEdges(edges: FlowEdgeDefinition[], key: "from" | "to") {
 function edgeSourceY(edge: FlowEdgeDefinition, positions: Map<string, FlowNodeModel>) {
   const source = positions.get(edge.from);
   return source ? source.y + source.h / 2 : 0;
+}
+
+function edgeTargetY(edge: FlowEdgeDefinition, positions: Map<string, FlowNodeModel>) {
+  const target = positions.get(edge.to);
+  return target ? target.y + target.h / 2 : 0;
+}
+
+function edgeSlotIndexes(groups: Map<string, FlowEdgeDefinition[]>) {
+  const indexes = new Map<FlowEdgeDefinition, number>();
+  for (const group of groups.values()) {
+    group.forEach((edge, index) => indexes.set(edge, index));
+  }
+  return indexes;
 }
 
 function routeThroughJunction(from: { x: number; y: number }, to: { x: number; y: number }, junction: { x: number; y: number }) {

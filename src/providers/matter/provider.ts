@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { matterLabelForKey, matterMacForKey, type MatterBinding } from "../../config/bindings";
+import { matterLabelForKey, matterMacForKey, matterUniqueIdForKey, type MatterBinding } from "../../config/bindings";
 import { normalizeValue } from "../../runtime/sources";
 import type {
   CommandResult,
@@ -31,6 +31,7 @@ export class MatterProvider implements ProviderAdapter {
   private nodeByKey = new Map<string, number>();
   private resolvedTargets = new Set<string>();
   private labelByNode = new Map<number, string>();
+  private uniqueIdByNode = new Map<number, string>();
   private macByNode = new Map<number, string>();
   private availableByNode = new Map<number, boolean>();
   private offlineSinceByNode = new Map<number, number>();
@@ -84,11 +85,11 @@ export class MatterProvider implements ProviderAdapter {
           { updated: () => source.updated() },
         ]),
       );
-      this.sources = [...runtime.sources.values()].map((source) => source.binding);
+      this.sources = [...runtime.sources.values()].map((source) => source.binding).filter((source) => source.provider === "matter");
     }
     if (runtime.targets) {
       this.targets = new Map(
-        [...runtime.targets.entries()].map(([target, binding]) => [target, binding]),
+        [...runtime.targets.entries()].filter(([, binding]) => binding.provider === "matter").map(([target, binding]) => [target, binding]),
       );
     }
     if (this.options.enabled === false) {
@@ -296,6 +297,7 @@ export class MatterProvider implements ProviderAdapter {
         key,
         nodeId,
         label: this.labelByNode.get(nodeId),
+        uniqueId: this.uniqueIdByNode.get(nodeId),
         mac: this.macByNode.get(nodeId),
         available: this.availableByNode.get(nodeId),
         offlineSince: this.offlineSinceByNode.get(nodeId),
@@ -476,11 +478,15 @@ export class MatterProvider implements ProviderAdapter {
       const attrs = node.attributes ?? {};
       const nodeId = Number(node.node_id ?? node.nodeId ?? node.id);
       const label = attrs["0/40/5"] ?? node.name ?? node.label;
+      const uniqueId = attrs["0/40/18"];
       const mac = macFromAttrs(attrs);
       const hasAvailable = "available" in node;
       const available = Boolean(node.available);
       if (Number.isFinite(nodeId) && typeof label === "string") {
         this.labelByNode.set(nodeId, label);
+      }
+      if (Number.isFinite(nodeId) && typeof uniqueId === "string" && uniqueId) {
+        this.uniqueIdByNode.set(nodeId, uniqueId);
       }
       if (Number.isFinite(nodeId) && mac) {
         this.macByNode.set(nodeId, mac);
@@ -504,7 +510,7 @@ export class MatterProvider implements ProviderAdapter {
         changed = true;
       }
       for (const binding of this.sources) {
-        if (!binding.path || !this.matchesKey({ label, mac }, binding.key)) {
+        if (!binding.path || !this.matchesKey({ label, uniqueId, mac }, binding.key)) {
           continue;
         }
         if (Number.isFinite(nodeId)) {
@@ -523,7 +529,7 @@ export class MatterProvider implements ProviderAdapter {
         }
       }
       for (const target of this.targets.values()) {
-        if (this.matchesKey({ label, mac }, parentTarget(target.target)) && Number.isFinite(nodeId)) {
+        if (this.matchesKey({ label, uniqueId, mac }, parentTarget(target.target)) && Number.isFinite(nodeId)) {
           this.nodeByKey.set(target.target, nodeId);
           if (!this.resolvedTargets.has(target.target)) {
             this.resolvedTargets.add(target.target);
@@ -893,7 +899,11 @@ export class MatterProvider implements ProviderAdapter {
       .join(" ");
   }
 
-  private matchesKey(identity: { label: unknown; mac?: string | null }, key: string) {
+  private matchesKey(identity: { label: unknown; uniqueId?: unknown; mac?: string | null }, key: string) {
+    const configuredUniqueId = matterUniqueIdForKey(this.options.bindings ?? {}, key);
+    if (configuredUniqueId && typeof identity.uniqueId === "string" && identity.uniqueId === configuredUniqueId) {
+      return true;
+    }
     const configuredMac = matterMacForKey(this.options.bindings ?? {}, key);
     if (configuredMac && identity.mac?.toLowerCase() === configuredMac.toLowerCase()) {
       return true;

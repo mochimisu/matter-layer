@@ -4,6 +4,7 @@ export type Snapshot = {
   targets: Array<{
     target: string;
     key: string;
+    provider: "matter" | "ha" | "timer" | "poll" | "synthetic" | "fake";
     capabilities?: Record<string, unknown>;
     display?: {
       status?: {
@@ -41,7 +42,12 @@ export type Snapshot = {
   rules: Array<{ name: string; enabled: boolean; deps: string[]; outputs?: string[]; lastRunAt?: number; lastError?: string }>;
   layers: Array<{
     target: string;
-    layers: Array<{ layer: string; output: { state: unknown; reason?: string; expiresAt?: number }; since?: number }>;
+    layers: Array<{
+      layer: string;
+      output: { state: unknown; reason?: string; expiresAt?: number; writer?: string };
+      since?: number;
+      items?: Array<{ key: string; output: { state: unknown; reason?: string; expiresAt?: number; writer?: string }; since?: number }>;
+    }>;
     surfaced: { layer: string; output: { state: unknown; reason?: string }; since?: number } | null;
   }>;
   commands?: Array<unknown>;

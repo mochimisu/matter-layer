@@ -16,16 +16,25 @@ type DelayState<T> = {
   clearAt?: number;
 };
 
+type HoldState = {
+  wasActive?: boolean;
+  clearAt?: number;
+};
+
 const runtimeState = globalThis as typeof globalThis & {
   __matterLayerPulses?: Map<string, PulseState>;
   __matterLayerTruth?: Map<string, { becameTrueAt?: number; wasTrueSince?: number }>;
   __matterLayerDelays?: Map<string, DelayState<unknown>>;
+  __matterLayerHolds?: Map<string, HoldState>;
+  __matterLayerLatches?: Map<string, boolean>;
   __matterLayerThrottles?: Map<string, { bucket: number; emitted: unknown; latest: unknown }>;
 };
 
 const pulses = runtimeState.__matterLayerPulses ?? (runtimeState.__matterLayerPulses = new Map());
 const truth = runtimeState.__matterLayerTruth ?? (runtimeState.__matterLayerTruth = new Map());
 const delays = runtimeState.__matterLayerDelays ?? (runtimeState.__matterLayerDelays = new Map());
+const holds = runtimeState.__matterLayerHolds ?? (runtimeState.__matterLayerHolds = new Map());
+const latches = runtimeState.__matterLayerLatches ?? (runtimeState.__matterLayerLatches = new Map());
 const throttles = runtimeState.__matterLayerThrottles ?? (runtimeState.__matterLayerThrottles = new Map());
 
 export const state = {
@@ -62,19 +71,58 @@ export const state = {
 
   wasTrueFor(value: boolean, duration: string) {
     const key = nextCallId("wasTrueFor");
+    recordRead(key);
     const entry = truth.get(key) ?? {};
-    const now = readClock();
+    const now = readClockUntracked();
     if (value) {
       entry.wasTrueSince ??= now;
       entry.becameTrueAt = now;
       truth.set(key, entry);
+      const thresholdAt = entry.wasTrueSince + parseDuration(duration);
+      if (now < thresholdAt) {
+        scheduleAt(thresholdAt, key);
+        return false;
+      }
+      return true;
+    }
+    if (entry.wasTrueSince !== undefined || entry.becameTrueAt !== undefined) {
+      truth.delete(key);
+    }
+    return false;
+  },
+
+  holdTrue(key: string, value: boolean, delay: string) {
+    const source = `holdTrue.${key}`;
+    recordRead(source);
+    const now = readClockUntracked();
+    const entry = holds.get(source) ?? {};
+    if (value) {
+      holds.set(source, { wasActive: true });
+      return true;
+    }
+    if (!entry.wasActive) {
       return false;
     }
-    if (!entry.wasTrueSince) {
-      truth.set(key, entry);
+    entry.clearAt ??= now + parseDuration(delay);
+    if (now < entry.clearAt) {
+      holds.set(source, entry);
+      scheduleAt(entry.clearAt, source);
+      return true;
+    }
+    holds.delete(source);
+    return false;
+  },
+
+  latch(key: string, set: boolean, reset: boolean) {
+    if (reset) {
+      latches.set(key, false);
       return false;
     }
-    return now - entry.wasTrueSince >= parseDuration(duration);
+    if (set) {
+      latches.set(key, true);
+      return true;
+    }
+    return latches.get(key) ?? false;
   },
 
   delayClear<T extends Record<string, unknown>>(key: string, delay: string, value: T) {

@@ -34,6 +34,7 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
     ...options,
     on: onDefaults,
   });
+  device.set({ power: "off" }, { layer: "default", reason: "Switch idle" });
   const led = device.endpoint(6).light("statusLed", {
     epaper: { excludeFromFlow: true },
   });
@@ -46,10 +47,10 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
     const write = () => {
       if (value === true) {
         device.set({ ...device.defaults }, { layer: "automation" });
-      } else if (value === false) {
-        device.set({ power: "off" }, { layer: "automation" });
+      } else if (value) {
+        device.set(value, { layer: "automation" });
       } else {
-        device.set(value ?? null, { layer: "automation" });
+        device.set(null, { layer: "automation" });
       }
     };
     write();
@@ -74,6 +75,7 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
       state: { power: value },
       layer: "override",
       reason: `Paddle pressed until ${formatExpirationTime(expiresAt)}`,
+      writer: "manual",
       expiresAt,
     };
   }
@@ -94,10 +96,13 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
 
 function ledStateFor(active: {
   layer: LayerName;
-  state?: Record<string, unknown> | null;
+  state?: unknown;
   power?: unknown;
 }) {
-  const power = active.state?.power ?? active.power;
+  const state = active.state && typeof active.state === "object" && !Array.isArray(active.state)
+    ? active.state as Record<string, unknown>
+    : undefined;
+  const power = state?.power ?? active.power;
   return {
     power: "on",
     color: ledColors[active.layer],

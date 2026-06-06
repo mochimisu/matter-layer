@@ -1,7 +1,7 @@
 import { matterDevice } from "matter-layer/devices";
 
 export function fp300(key: string) {
-  return matterDevice(key, {
+  const device = matterDevice(key, {
     vendor: "Aqara",
     product: "Presence Multi-Sensor FP300",
     presence: {
@@ -29,4 +29,7 @@ export function fp300(key: string) {
       encoding: "matter-battery-percent",
     },
   });
+  device.addSource<number>("temperature", { path: "3/1026/0", encoding: "matter-temperature" });
+  device.addSource<number>("humidity", { path: "4/1029/0", encoding: "matter-humidity" });
+  return device as typeof device & { temperature: number; humidity: number };
 }

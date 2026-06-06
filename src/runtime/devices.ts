@@ -10,6 +10,7 @@ import type {
   SourceUpdate,
   TargetBinding,
   TargetId,
+  ProviderName,
 } from "./types";
 
 const deviceState = globalThis as typeof globalThis & {
@@ -24,10 +25,10 @@ export type DeviceRuntime = {
   registerEventHandler(event: string, handler: () => void): void;
   registerSourceHandler(source: string, handler: (update: SourceUpdate) => void): void;
   registerEventAction(action: { name: string; event: string; outputs: TargetId[] }): void;
-  recordRuleOutput(target: TargetId): void;
-  writeLayer(target: TargetId, layer: LayerName, output: LayerOutput | null): void;
-  clearLayer(target: TargetId, layer: LayerName): void;
-  hasLayer(target: TargetId, layer: LayerName): boolean;
+  recordRuleOutput(target: TargetId, hasOutput: boolean): void;
+  writeLayer(target: TargetId, layer: LayerName, output: LayerOutput | null, key?: string): void;
+  clearLayer(target: TargetId, layer: LayerName, key?: string): void;
+  hasLayer(target: TargetId, layer: LayerName, key?: string): boolean;
   surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput; since?: number } | null;
   updateSource(update: SourceUpdate): void;
   enqueueApply(target: TargetId): void;
@@ -35,7 +36,7 @@ export type DeviceRuntime = {
 
 export type ActiveLayerState = {
   layer: LayerName;
-  state: Record<string, unknown> | null;
+  state: Record<string, unknown> | unknown | null;
   power?: unknown;
   reason?: string;
 } | null;
@@ -82,6 +83,7 @@ export type DeviceBatteryOptions = {
 export type DeviceMetricOptions = {
   property: string;
   path: string;
+  provider?: ProviderName;
   encoding?: string;
   label: string;
   unit?: string;
@@ -99,10 +101,11 @@ export class LayerSlot {
   constructor(
     private readonly target: string,
     private readonly layer: LayerName,
+    private readonly key?: string,
   ) {}
 
   clear() {
-    runtime().clearLayer(this.target, this.layer);
+    runtime().clearLayer(this.target, this.layer, this.key);
   }
 }
 
@@ -125,7 +128,12 @@ export class TargetDevice {
   readonly state: Record<string, unknown> = {};
   readonly defaults: Record<string, unknown>;
 
-  constructor(key: string, capabilities: Record<string, unknown> = {}, defaults: Record<string, unknown> = {}) {
+  constructor(
+    key: string,
+    capabilities: Record<string, unknown> = {},
+    defaults: Record<string, unknown> = {},
+    provider: ProviderName = "matter",
+  ) {
     this.key = key;
     this.layer = new LayerProxy(key);
     this.defaults = defaults;
@@ -136,7 +144,7 @@ export class TargetDevice {
     runtime().registerTarget({
       target: key,
       key,
-      provider: "matter",
+      provider,
       capabilities,
       display: {
         status,
@@ -147,14 +155,15 @@ export class TargetDevice {
     });
   }
 
-  set(state: Record<string, unknown> | null, options: { layer?: LayerName; reason?: string } = {}) {
+  set(state: Record<string, unknown> | null, options: { layer?: LayerName; reason?: string; writer?: string } = {}) {
     const layer = options.layer ?? "automation";
+    const writer = options.writer ?? (layer === "automation" ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined);
     runtime().writeLayer(this.key, layer, {
       state,
       reason: options.reason ?? (layer === "automation" ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined),
-      writer: options.reason,
-    });
-    runtime().recordRuleOutput(this.key);
+      writer,
+    }, writer);
+    runtime().recordRuleOutput(this.key, state !== null);
     runtime().enqueueApply(this.key);
   }
 
@@ -226,7 +235,9 @@ export function activeLayer(target: TargetId) {
       ? {
           layer: surfaced.layer,
           state: surfaced.output.state,
-          power: surfaced.output.state?.power,
+          power: surfaced.output.state && typeof surfaced.output.state === "object" && !Array.isArray(surfaced.output.state)
+            ? (surfaced.output.state as Record<string, unknown>).power
+            : undefined,
           reason: surfaced.output.reason,
         }
       : null,
@@ -278,10 +289,11 @@ export class CoverGroup {
 export class ReadableDevice extends TargetDevice {
   private readonly sources = new Map<string, SourceRef>();
 
-  addSource<T>(property: string, args: { path?: string; when?: unknown; encoding?: string } = {}) {
+  addSource<T>(property: string, args: { provider?: ProviderName; path?: string; when?: unknown; encoding?: string } = {}) {
     const source = makeSource<T>({
       key: this.key,
       property,
+      provider: args.provider,
       path: args.path,
       when: args.when,
       encoding: args.encoding,
@@ -297,7 +309,9 @@ export class ReadableDevice extends TargetDevice {
 }
 
 export function light(key: string, options: LightOptions = {}) {
-  return new TargetDevice(key, withDefaultStatus(options, lightStatus()), { power: "on", ...(options.on ?? {}) });
+  const device = new TargetDevice(key, withDefaultStatus(options, lightStatus()), { power: "on", ...(options.on ?? {}) });
+  device.set({ power: "off" }, { layer: "default", reason: "Light idle" });
+  return device;
 }
 
 export function switchDevice(key: string, options: Record<string, unknown> = {}) {
@@ -309,7 +323,7 @@ export function remote(key: string, options: Record<string, unknown> = {}) {
 }
 
 export function cover(key: string, options: Record<string, unknown> = {}) {
-  return new CoverDevice(key, withDefaultStatus(options, {
+  const device = new CoverDevice(key, withDefaultStatus(options, {
     property: "position",
     path: String((options.position as { path?: string } | undefined)?.path ?? "1/258/14"),
     encoding: "matter-percent",
@@ -318,6 +332,8 @@ export function cover(key: string, options: Record<string, unknown> = {}) {
       100: { label: "closed", tone: "closed" },
     },
   }));
+  device.set({ position: "open" }, { layer: "default", reason: "Cover idle" });
+  return device;
 }
 
 export function coverGroup(keysOrCovers: Array<string | CoverDevice>, options: { member?: (key: string) => CoverDevice } = {}) {
@@ -350,9 +366,10 @@ export function matterDevice(
     battery?: DeviceBatteryOptions;
     rssi?: DeviceRssiOptions;
     metrics?: DeviceMetricOptions[];
+    provider?: ProviderName;
   } & Record<string, unknown>,
 ) {
-  const device = new ReadableDevice(key, options);
+  const device = new ReadableDevice(key, options, {}, options.provider ?? "matter");
   if (options.presence) {
     device.addSource<boolean>("presence", options.presence);
   }
@@ -417,6 +434,7 @@ function registerDeviceMetrics(key: string, metrics: DeviceMetricOptions[] | und
     const source = makeSource({
       key,
       property: metric.property,
+      provider: metric.provider,
       path: metric.path,
       encoding: metric.encoding,
     });
@@ -451,10 +469,7 @@ function normalizeAutoValue(value: boolean | Record<string, unknown> | null | un
   if (value === true) {
     return { ...defaults };
   }
-  if (value === false) {
-    return { power: "off" };
-  }
-  if (value == null) {
+  if (!value) {
     return null;
   }
   return value;

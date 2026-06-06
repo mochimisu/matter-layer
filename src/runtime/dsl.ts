@@ -96,6 +96,7 @@ export function createRuleRegistration(name: string, run: () => void): RuleRegis
     enabled: true,
     deps: new Set(),
     outputs: new Set(),
+    outputWrites: new Map(),
   };
 }
 
