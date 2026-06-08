@@ -108,12 +108,12 @@ describe("e-paper renderer", () => {
 
     const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", now: 1 });
 
-    expect(svg).toContain("stroke=\"#666666\"");
+    expect(svg).toContain("stroke=\"#999999\"");
     expect(svg).toContain("stroke-dasharray=");
 
     const grayscaleSvg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", now: 1, palette: "grayscale" });
 
-    expect(grayscaleSvg).toContain("stroke=\"#666666\"");
+    expect(grayscaleSvg).toContain("stroke=\"#999999\"");
     expect(grayscaleSvg).not.toContain("stroke-dasharray=");
   });
 
@@ -168,7 +168,7 @@ describe("e-paper renderer", () => {
 
     const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "mbrBathroom", now: 1 });
 
-    expect(svg.match(/stroke="#666666"/g) ?? []).toHaveLength(1);
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
     expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
   });
 
@@ -234,7 +234,7 @@ describe("e-paper renderer", () => {
 
     expect(svg).toContain(">door<");
     expect(svg).not.toContain("pulse");
-    expect(svg.match(/stroke="#666666"/g) ?? []).toHaveLength(1);
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
     expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
 
     const activeSvg = renderRoomEpaperPanelSvg({
@@ -244,7 +244,7 @@ describe("e-paper renderer", () => {
       ],
     } as never, { room: "office", now: 60_000 });
 
-    expect(activeSvg.match(/stroke="#666666"/g) ?? []).toHaveLength(0);
+    expect(activeSvg.match(/stroke="#999999"/g) ?? []).toHaveLength(0);
     expect(activeSvg.match(/stroke-dasharray=/g) ?? []).toHaveLength(0);
   });
 
@@ -287,7 +287,7 @@ describe("e-paper renderer", () => {
 
     expect(svg).toContain(">presence<");
     expect(svg).toContain(">light<");
-    expect(svg.match(/stroke="#666666"/g) ?? []).toHaveLength(1);
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
     expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
   });
 });

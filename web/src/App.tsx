@@ -25,6 +25,7 @@ type EpaperRenderEvent = {
 };
 const epaperStatValueCache = new Map<string, { value: string; updatedAt: number }>();
 const epaperPreviewRenderCache = new Map<string, { fingerprint: string; generatedAt: number }>();
+const epaperInactiveLine = "#999999";
 
 function tabFromLocation(): AppTab {
   const tab = new URLSearchParams(location.search).get("tab");
@@ -1620,7 +1621,7 @@ function EpaperFlowGraph({ flow }: { flow: EpaperFlow }) {
             <path
               d={epaperCurvedPath(edge.from.x + edge.from.w, fromY, edge.laneX, edge.to.x, toY)}
               fill="none"
-              stroke="#111"
+              stroke={edge.enabled ? "#111" : epaperInactiveLine}
               strokeWidth="2"
               strokeLinecap="round"
               strokeLinejoin="round"

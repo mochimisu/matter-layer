@@ -22,6 +22,7 @@ type MatterStatus = {
 type MatterProviderSnapshot = { name: string; status: MatterStatus | null } | undefined;
 type EpaperExpandedDep = { source: string; active: boolean };
 const epaperFontFamily = "Inter, Arial, sans-serif";
+const epaperInactiveLine = "#999999";
 
 export type EpaperPalette = "mono" | "grayscale" | "color";
 export type EpaperFormat = "svg" | "png";
@@ -506,7 +507,7 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
       ? ` stroke-dasharray="${1.2 * scaleX} ${4 * scaleX}"`
       : "";
     const d = epaperCurvedPath((edge.from.x + edge.from.w) * scaleX, fromY, edge.laneX * scaleX, edge.to.x * scaleX, toY, scaleX, scaleY);
-    const stroke = edge.enabled ? profile.foreground : "#666666";
+    const stroke = edge.enabled ? profile.foreground : epaperInactiveLine;
     return `<g>
       <path d="${d}" fill="none" stroke="${profile.background}" stroke-width="${6 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="1" stroke-width="${2 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>
