@@ -120,40 +120,40 @@ describe("e-paper renderer", () => {
   it("only makes the active source path solid for an active automation opinion", () => {
     const snapshot = {
       sources: [
-        { source: "mbrBathroom.mainPresence.presence", key: "mbrBathroom.mainPresence", property: "presence", value: true, since: 1 },
-        { source: "mbrBathroom.showerPresence.presence", key: "mbrBathroom.showerPresence", property: "presence", value: false, since: 1 },
+        { source: "office.near.presence", key: "office.near", property: "presence", value: true, since: 1 },
+        { source: "office.far.presence", key: "office.far", property: "presence", value: false, since: 1 },
       ],
       signals: [],
       targets: [
         {
-          target: "mbrBathroom.main",
-          key: "mbrBathroom.main",
+          target: "office.light",
+          key: "office.light",
           provider: "matter",
           capabilities: { power: true },
         },
       ],
       rules: [
         {
-          name: "mbrBathroom.lights",
+          name: "office.light",
           enabled: true,
-          deps: ["mbrBathroom.mainPresence.presence", "mbrBathroom.showerPresence.presence"],
-          outputs: ["mbrBathroom.main"],
+          deps: ["office.near.presence", "office.far.presence"],
+          outputs: ["office.light"],
           lastRunAt: 1,
         },
       ],
       layers: [
         {
-          target: "mbrBathroom.main",
+          target: "office.light",
           layers: [
             {
               layer: "automation",
-              output: { state: { power: "on" }, reason: "mbrBathroom.lights", writer: "mbrBathroom.lights" },
+              output: { state: { power: "on" }, reason: "office.light", writer: "office.light" },
               items: [
-                { key: "mbrBathroom.lights", output: { state: { power: "on" }, reason: "mbrBathroom.lights", writer: "mbrBathroom.lights" } },
+                { key: "office.light", output: { state: { power: "on" }, reason: "office.light", writer: "office.light" } },
               ],
             },
           ],
-          surfaced: { layer: "automation", output: { state: { power: "on" }, reason: "mbrBathroom.lights" } },
+          surfaced: { layer: "automation", output: { state: { power: "on" }, reason: "office.light" } },
         },
       ],
       commands: [],
@@ -166,10 +166,13 @@ describe("e-paper renderer", () => {
       ],
     };
 
-    const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "mbrBathroom", now: 1 });
+    const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", title: "Room", now: 1 });
 
+    expect(svg).toContain(">near<");
+    expect(svg).toContain(">far<");
     expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
     expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
+    expect(svg.indexOf("stroke=\"#999999\"")).toBeLessThan(svg.lastIndexOf("stroke=\"#000\" stroke-opacity=\"1\""));
   });
 
   it("keeps a transitive pulse source dashed unless the pulse is active", () => {
@@ -289,5 +292,62 @@ describe("e-paper renderer", () => {
     expect(svg).toContain(">light<");
     expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
     expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
+  });
+
+  it("draws a solid edge for a residual output caused by a now-clear input", () => {
+    const snapshot = {
+      sources: [
+        { source: "office.presence.presence", key: "office.presence", property: "presence", value: false, since: 1 },
+      ],
+      signals: [],
+      targets: [
+        {
+          target: "office.fan",
+          key: "office.fan",
+          provider: "matter",
+          capabilities: { power: true },
+        },
+      ],
+      rules: [
+        {
+          name: "office.fan",
+          enabled: true,
+          deps: ["office.presence.presence"],
+          causes: ["office.presence.presence"],
+          outputs: ["office.fan"],
+          outputWrites: [{ target: "office.fan", hasOutput: true }],
+          lastRunAt: 1,
+        },
+      ],
+      layers: [
+        {
+          target: "office.fan",
+          layers: [
+            {
+              layer: "automation",
+              output: { state: { power: "on" }, reason: "office.fan", writer: "office.fan" },
+              items: [
+                { key: "office.fan", output: { state: { power: "on" }, reason: "office.fan", writer: "office.fan" } },
+              ],
+            },
+          ],
+          surfaced: { layer: "automation", output: { state: { power: "on" }, reason: "office.fan" } },
+        },
+      ],
+      commands: [],
+      matterLog: [],
+      events: [],
+      eventActions: [],
+      pulses: [],
+      providers: [
+        { name: "matter", status: { enabled: false, connected: false, resolved: [] } },
+      ],
+    };
+
+    const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", title: "Room", now: 1 });
+
+    expect(svg).toContain(">presence<");
+    expect(svg).not.toContain("stroke=\"#999999\"");
+    expect(svg).not.toContain("stroke-dasharray=");
   });
 });

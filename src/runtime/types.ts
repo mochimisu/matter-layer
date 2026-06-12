@@ -118,6 +118,7 @@ export type RuleRegistration = {
   run: () => void;
   enabled: boolean;
   deps: Set<SourceId>;
+  causes: Set<SourceId>;
   outputs: Set<TargetId>;
   outputWrites: Map<TargetId, boolean>;
   lastRunAt?: number;

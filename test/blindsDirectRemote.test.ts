@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +57,43 @@ describe("direct blind remote inference", () => {
     });
 
     runtime.stop();
+  });
+
+  it("clears a matching BILRESA blind override on repeated press", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-10T12:00:00-07:00"));
+    const runtime = buildRuntime();
+    try {
+      await runtime.start();
+
+      runtime.dispatchEvent("office.blindsRemote.button.1.initialPress");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.layers.surface("office.blinds")).toMatchObject({
+        layer: "override",
+        output: {
+          state: { position: "open" },
+          writer: "manual",
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(2500);
+      runtime.dispatchEvent("office.blindsRemote.button.1.initialPress");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(runtime.layers.surface("office.blinds")).toMatchObject({
+        layer: "default",
+        output: {
+          state: { position: "open" },
+        },
+      });
+
+      expect(runtime.commandResults.find((result) =>
+        result.command.target === "office.blinds" && result.command.state?.motion === "stop"
+      )).toBeUndefined();
+    } finally {
+      runtime.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("persists BILRESA manual blind input across runtime restarts", async () => {

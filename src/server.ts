@@ -23,6 +23,7 @@ async function main() {
     url: config.matterWsUrl,
     dryRun: config.dryRun,
     enabled: config.matterEnabled,
+    remoteKeepaliveEnabled: config.matterRemoteKeepaliveEnabled,
     bindings: config.matterBindings,
   });
   runtime.registerProvider(matterProvider);
@@ -169,6 +170,16 @@ async function main() {
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  app.post("/api/matter/remote-keepalive", (req, res) => {
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: "enabled must be boolean" });
+      return;
+    }
+    matterProvider.setRemoteKeepaliveEnabled(enabled);
+    res.json(runtime.snapshot());
   });
 
   app.post("/api/automations/:name", (req, res) => {

@@ -246,14 +246,19 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
   const signalById = new Map(snapshot.signals.map((signal) => [signal.id, signal]));
   const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, now);
   const activeFlowSources = new Set<string>();
+  const causalFlowSources = new Set<string>();
   const activeFlowSinks = new Set<string>();
   const automations = [
     ...roomSnapshot.rules.map((rule) => {
       const deps = uniqueEpaperDepStates(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById)), 8);
+      const causes = uniqueEpaperCauseSources(rule.causes?.flatMap((dep) => expandEpaperCauseDeps(dep, signalById, sourceById)) ?? [], 8);
       const outputWrites = epaperRuleOutputWrites(rule, roomSnapshot.layers);
       const outputs = epaperVisibleFlowOutputs(outputWrites.map((write) => write.target), targetById);
       for (const dep of deps) {
         if (dep.active) activeFlowSources.add(epaperFlowLabel(dep.source, options.room, 48));
+      }
+      for (const cause of causes) {
+        causalFlowSources.add(epaperFlowLabel(cause, options.room, 48));
       }
       for (const output of outputs) {
         if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, options.room, 48));
@@ -288,7 +293,7 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
     }),
   ].filter((automation) => automation.outputs.length > 0).slice(0, 6);
   const flowY = statCards.length ? 142 : 100;
-  const flow = buildEpaperFlow(automations, activeFlowSources, activeFlowSinks, flowY);
+  const flow = buildEpaperFlow(automations, activeFlowSources, new Set([...activeFlowSources, ...causalFlowSources]), activeFlowSinks, flowY);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${profile.width}" height="${profile.height}" viewBox="0 0 ${profile.width} ${profile.height}">
@@ -500,19 +505,24 @@ type EpaperFlowEdge = { id: string; from: EpaperFlowNode; to: EpaperFlowNode; la
 type EpaperFlow = { sources: EpaperFlowNode[]; sinks: EpaperFlowNode[]; edges: EpaperFlowEdge[] };
 
 function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: number, scaleY: number) {
-  const edgeSvg = flow.edges.map((edge) => {
+  const edgeBackdrops = flow.edges.map((edge) => {
     const fromY = (edge.from.y + edge.from.h / 2 + edge.sourceOffset) * scaleY;
     const toY = (edge.to.y + edge.to.h / 2 + edge.sinkOffset) * scaleY;
-    const dash = !edge.enabled && profile.palette === "mono"
-      ? ` stroke-dasharray="${1.2 * scaleX} ${4 * scaleX}"`
-      : "";
     const d = epaperCurvedPath((edge.from.x + edge.from.w) * scaleX, fromY, edge.laneX * scaleX, edge.to.x * scaleX, toY, scaleX, scaleY);
-    const stroke = edge.enabled ? profile.foreground : epaperInactiveLine;
-    return `<g>
-      <path d="${d}" fill="none" stroke="${profile.background}" stroke-width="${6 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="1" stroke-width="${2 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>
-    </g>`;
+    return `<path d="${d}" fill="none" stroke="${profile.background}" stroke-width="${6 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"/>`;
   }).join("\n    ");
+  const edgeSvg = [false, true].flatMap((enabled) =>
+    flow.edges.filter((edge) => edge.enabled === enabled).map((edge) => {
+      const fromY = (edge.from.y + edge.from.h / 2 + edge.sourceOffset) * scaleY;
+      const toY = (edge.to.y + edge.to.h / 2 + edge.sinkOffset) * scaleY;
+      const dash = !edge.enabled && profile.palette === "mono"
+        ? ` stroke-dasharray="${1.2 * scaleX} ${4 * scaleX}"`
+        : "";
+      const d = epaperCurvedPath((edge.from.x + edge.from.w) * scaleX, fromY, edge.laneX * scaleX, edge.to.x * scaleX, toY, scaleX, scaleY);
+      const stroke = edge.enabled ? profile.foreground : epaperInactiveLine;
+      return `<path d="${d}" fill="none" stroke="${stroke}" stroke-opacity="1" stroke-width="${2 * Math.min(scaleX, scaleY)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
+    }),
+  ).join("\n    ");
   const nodeSvg = [...flow.sources, ...flow.sinks].map((node) => {
     const fill = node.active ? profile.inverse : profile.background;
     const text = node.active ? profile.inverseText : profile.foreground;
@@ -523,6 +533,7 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
     </g>`;
   }).join("\n    ");
   return `<g>
+    ${edgeBackdrops}
     ${edgeSvg}
     ${nodeSvg}
   </g>`;
@@ -531,6 +542,7 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
 function buildEpaperFlow(
   automations: Array<{ enabled: boolean; deps: string[]; outputs: string[]; activeOutputs?: string[] }>,
   activeSources = new Set<string>(),
+  causalSources = activeSources,
   activeSinks = new Set<string>(),
   yStart = 100,
 ): EpaperFlow {
@@ -566,7 +578,7 @@ function buildEpaperFlow(
         sourceLabel: dep,
         sinkLabel: output,
         enabled: automation.enabled
-          && activeSources.has(dep)
+          && causalSources.has(dep)
           && (automation.activeOutputs ? automation.activeOutputs.includes(output) : true),
       })),
     ),
@@ -637,6 +649,23 @@ function expandEpaperSourceDeps(
     expandEpaperSourceDeps(signalDep, signalById, sourceById, transitiveDepActiveById, new Set(seen))
       .map((expanded) => ({ ...expanded, active: expanded.active && gateActive })),
   );
+}
+
+function expandEpaperCauseDeps(
+  dep: string,
+  signalById: Map<string, Snapshot["signals"][number]>,
+  sourceById: Map<string, SnapshotSource>,
+  seen = new Set<string>(),
+): string[] {
+  if (dep === "time.tick" || seen.has(dep)) return [];
+  const signal = signalById.get(dep);
+  if (!signal) return sourceById.has(dep) ? [dep] : [];
+  seen.add(dep);
+  return signal.deps.flatMap((signalDep) => expandEpaperCauseDeps(signalDep, signalById, sourceById, new Set(seen)));
+}
+
+function uniqueEpaperCauseSources(values: string[], limit: number) {
+  return [...new Set(values.filter(Boolean))].slice(0, limit);
 }
 
 function uniqueEpaperDepStates(values: EpaperExpandedDep[], limit: number): EpaperExpandedDep[] {
@@ -967,6 +996,7 @@ function epaperRenderFingerprint(
       name: rule.name,
       enabled: rule.enabled,
       deps: rule.deps,
+      causes: "causes" in rule ? rule.causes : undefined,
       outputs: rule.outputs,
       outputWrites: "outputWrites" in rule ? rule.outputWrites : undefined,
       depValues: rule.deps

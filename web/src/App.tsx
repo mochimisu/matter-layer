@@ -17,6 +17,7 @@ import "./style.css";
 type AppTab = "devices" | "details" | "graph" | "log" | "epaper";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
 type DeviceStatus = { label: string; tone?: string; icon?: ReactNode; since?: number };
+type EpaperExpandedDep = { source: string; active: boolean };
 type EpaperRenderEvent = {
   type: "epaper.snapshot" | "epaper.update";
   display: string;
@@ -302,6 +303,14 @@ function App() {
     await mutate("matter-refresh", "/api/matter/refresh", { method: "POST" });
   }
 
+  async function setMatterRemoteKeepalive(enabled: boolean) {
+    await mutate("matter-remote-keepalive", "/api/matter/remote-keepalive", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
   async function setAutomation(name: string, enabled: boolean) {
     await mutate(name, `/api/automations/${encodeURIComponent(name)}`, {
       method: "POST",
@@ -372,6 +381,15 @@ function App() {
               <div className="header-matter-state">
                 <span>Matter</span>
                 <StatusPill status={matter?.status} now={now} />
+                <label className="header-keepalive-toggle" title="Toggle periodic Matter ping_node keepalive probes for remotes">
+                  <input
+                    type="checkbox"
+                    checked={matter?.status?.remoteKeepaliveEnabled !== false}
+                    disabled={busy === "matter-remote-keepalive" || matter?.status?.enabled === false}
+                    onChange={(event) => void setMatterRemoteKeepalive(event.target.checked)}
+                  />
+                  <span>Keepalive</span>
+                </label>
                 <button
                   className="header-icon-button"
                   title="Refresh Matter snapshot"
@@ -496,7 +514,9 @@ function App() {
                         {layer.layers.map((item) => (
                           <div key={item.layer} className="flex justify-between gap-2">
                             <span className="font-bold">{item.layer}</span>
-                            <span className="truncate text-gaia-muted">{item.output.reason ?? JSON.stringify(item.output.state)}</span>
+                            <span className="truncate text-gaia-muted" title={layerOutputLabel(item.output)}>
+                              {layerOutputLabel(item.output)}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -958,6 +978,18 @@ function DevicesOverview({
   return (
     <section className="gaia-panel device-room">
       <div className="device-table">
+        <div className="device-table-header">
+          <span>Status</span>
+          <span>Device</span>
+          <span>Layer</span>
+          <span>Reason</span>
+          <span>Metrics</span>
+          <span>Updated</span>
+          <span>Probe</span>
+          <span>RSSI</span>
+          <span>Actions</span>
+          <span>Ops</span>
+        </div>
         {rooms.map(([room, targets]) => (
           <Fragment key={room}>
             {(() => {
@@ -985,7 +1017,7 @@ function DevicesOverview({
               const label = deviceResolvedLabel(target, binding?.label);
               const displayLabel = deviceDisplayLabel(label, target, room);
               const deviceInfo = [label, target.key, [vendor, product].filter(Boolean).join(" ")].filter(Boolean);
-              const reason = layer?.surfaced?.output.reason ?? (layer?.surfaced ? formatValue(layer.surfaced.output.state) : "");
+              const reason = layer?.surfaced ? layerOutputLabel(layer.surfaced.output) : "";
               const actions = deviceActions(target, sourceById, onSetOverride, onSetSource, onClearOverride, onClearSource, onDispatchEvent);
               const rowClass = deviceRowIndex++ % 2 === 0 ? "device-table-row device-table-row-striped" : "device-table-row";
               return (
@@ -1001,7 +1033,7 @@ function DevicesOverview({
                     </button>
                   </span>
                   <span><LayerBadge layer={layer?.surfaced?.layer} /></span>
-                  <span className="min-w-0 truncate text-xs text-gaia-muted">{reason}</span>
+                  <span className="min-w-0 truncate text-xs text-gaia-muted" title={reason || undefined}>{reason}</span>
                   <span className="min-w-0 truncate text-xs text-gaia-muted">
                     {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
                   </span>
@@ -1085,14 +1117,18 @@ function DeviceDetail({
             <div key={bucket.layer} className="device-stack-layer">
               <div className="device-stack-layer-head">
                 <LayerBadge layer={bucket.layer} />
-                <span className="truncate text-xs font-bold text-gaia-muted">{bucket.output.reason ?? bucket.output.writer ?? formatValue(bucket.output.state)}</span>
+                <span className="truncate text-xs font-bold text-gaia-muted" title={layerOutputLabel(bucket.output)}>
+                  {layerOutputLabel(bucket.output)}
+                </span>
               </div>
               <code className="device-detail-code">{formatValue(bucket.output.state)}</code>
               <div className="device-stack-items">
                 {(bucket.items ?? [{ key: bucket.layer, output: bucket.output, since: bucket.since }]).map((item) => (
                   <div key={item.key} className="device-stack-item">
                     <span className="truncate font-black">{item.key}</span>
-                    <span className="truncate text-gaia-muted">{item.output.reason ?? item.output.writer ?? "opinion"}</span>
+                    <span className="truncate text-gaia-muted" title={layerOutputLabel(item.output)}>
+                      {item.output.reason ?? item.output.writer ?? "opinion"}
+                    </span>
                     <code>{formatValue(item.output.state)}</code>
                   </div>
                 ))}
@@ -1372,14 +1408,21 @@ function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null
   const rules = roomSnapshot?.rules ?? [];
   const eventActions = roomSnapshot?.eventActions ?? [];
   const signalById = new Map((snapshot?.signals ?? []).map((signal) => [signal.id, signal]));
+  const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, renderNow);
   const activeFlowSources = new Set<string>();
+  const causalFlowSources = new Set<string>();
   const activeFlowSinks = new Set<string>();
   const automations = [
     ...rules.map((rule) => {
-      const deps = uniqueLimited(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)), 8);
-      const outputs = epaperVisibleFlowOutputs(rule.outputs?.length ? rule.outputs : inferEpaperRuleOutputs(rule.name, roomSnapshot?.layers ?? []), targetById);
+      const deps = uniqueEpaperDepStates(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById)), 8);
+      const causes = uniqueEpaperCauseSources(rule.causes?.flatMap((dep) => expandEpaperCauseDeps(dep, signalById, sourceById)) ?? [], 8);
+      const outputWrites = epaperRuleOutputWrites(rule, roomSnapshot?.layers ?? []);
+      const outputs = epaperVisibleFlowOutputs(outputWrites.map((write) => write.target), targetById);
       for (const dep of deps) {
-        if (epaperSourceActive(sourceById.get(dep)?.value ?? signalById.get(dep)?.value)) activeFlowSources.add(epaperFlowLabel(dep, room, 48));
+        if (dep.active) activeFlowSources.add(epaperFlowLabel(dep.source, room, 48));
+      }
+      for (const cause of causes) {
+        causalFlowSources.add(epaperFlowLabel(cause, room, 48));
       }
       for (const output of outputs) {
         if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, room, 48));
@@ -1387,8 +1430,11 @@ function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null
       return {
         name: rule.name,
         enabled: rule.enabled,
-        deps: deps.map((dep) => epaperFlowLabel(dep, room, 48)),
+        deps: deps.map((dep) => epaperFlowLabel(dep.source, room, 48)),
         outputs: outputs.map((output) => epaperFlowLabel(output, room, 48)),
+        activeOutputs: outputWrites
+          .filter((write) => write.hasOutput && outputs.includes(write.target))
+          .map((write) => epaperFlowLabel(write.target, room, 48)),
         lastRunAt: rule.lastRunAt,
       };
     }),
@@ -1403,13 +1449,16 @@ function RoomEpaperImage({ snapshot, now, display }: { snapshot: Snapshot | null
         enabled: true,
         deps: [epaperFlowLabel(action.event, room, 48)],
         outputs: outputs.map((output) => epaperFlowLabel(output, room, 48)),
+        activeOutputs: outputs
+          .filter((output) => eventActionHasEpaperOpinion(layerByTarget.get(output)))
+          .map((output) => epaperFlowLabel(output, room, 48)),
         lastRunAt: action.lastRunAt,
       };
     }),
   ].filter((automation) => automation.outputs.length > 0).slice(0, 6);
   const statCards = epaperStats(snapshot, display.stats ?? [], renderNow);
   const flowY = statCards.length ? 142 : 100;
-  const epaperFlow = buildEpaperFlow(automations, activeFlowSources, activeFlowSinks, flowY);
+  const epaperFlow = buildEpaperFlow(automations, activeFlowSources, new Set([...activeFlowSources, ...causalFlowSources]), activeFlowSinks, flowY);
   const generatedAt = epaperPreviewGeneratedAt(display.id, epaperPreviewFingerprint(snapshot, display, renderNow), renderNow);
 
   return (
@@ -1603,6 +1652,7 @@ type EpaperFlowEdge = { id: string; from: EpaperFlowNode; to: EpaperFlowNode; la
 type EpaperFlow = { sources: EpaperFlowNode[]; sinks: EpaperFlowNode[]; edges: EpaperFlowEdge[] };
 
 function EpaperFlowGraph({ flow }: { flow: EpaperFlow }) {
+  const orderedEdges = [false, true].flatMap((enabled) => flow.edges.filter((edge) => edge.enabled === enabled));
   return (
     <g>
       {flow.edges.map((edge) => {
@@ -1618,16 +1668,23 @@ function EpaperFlowGraph({ flow }: { flow: EpaperFlow }) {
               strokeLinecap="round"
               strokeLinejoin="round"
             />
-            <path
-              d={epaperCurvedPath(edge.from.x + edge.from.w, fromY, edge.laneX, edge.to.x, toY)}
-              fill="none"
-              stroke={edge.enabled ? "#111" : epaperInactiveLine}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeDasharray={edge.enabled ? undefined : "5 4"}
-            />
           </g>
+        );
+      })}
+      {orderedEdges.map((edge) => {
+        const fromY = edge.from.y + edge.from.h / 2 + edge.sourceOffset;
+        const toY = edge.to.y + edge.to.h / 2 + edge.sinkOffset;
+        return (
+          <path
+            key={`${edge.id}:stroke`}
+            d={epaperCurvedPath(edge.from.x + edge.from.w, fromY, edge.laneX, edge.to.x, toY)}
+            fill="none"
+            stroke={edge.enabled ? "#111" : epaperInactiveLine}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray={edge.enabled ? undefined : "5 4"}
+          />
         );
       })}
       {[...flow.sources, ...flow.sinks].map((node) => (
@@ -1665,8 +1722,9 @@ function EpaperStatCards({ stats }: { stats: Array<{ label: string; value: strin
 }
 
 function buildEpaperFlow(
-  automations: Array<{ enabled: boolean; deps: string[]; outputs: string[] }>,
+  automations: Array<{ enabled: boolean; deps: string[]; outputs: string[]; activeOutputs?: string[] }>,
   activeSources = new Set<string>(),
+  causalSources = activeSources,
   activeSinks = new Set<string>(),
   yStart = 100,
 ): EpaperFlow {
@@ -1701,7 +1759,9 @@ function buildEpaperFlow(
       automation.outputs.map((output) => ({
         sourceLabel: dep,
         sinkLabel: output,
-        enabled: automation.enabled,
+        enabled: automation.enabled
+          && causalSources.has(dep)
+          && (automation.activeOutputs ? automation.activeOutputs.includes(output) : true),
       })),
     ),
   );
@@ -1746,12 +1806,62 @@ function epaperSourceActive(value: unknown) {
   return false;
 }
 
-function expandEpaperSourceDeps(dep: string, signalById: Map<string, Snapshot["signals"][number]>, seen = new Set<string>()): string[] {
+function expandEpaperSourceDeps(
+  dep: string,
+  signalById: Map<string, Snapshot["signals"][number]>,
+  sourceById: Map<string, Snapshot["sources"][number]>,
+  transitiveDepActiveById = new Map<string, boolean>(),
+  seen = new Set<string>(),
+): EpaperExpandedDep[] {
   if (dep === "time.tick" || seen.has(dep)) return [];
   const signal = signalById.get(dep);
-  if (!signal) return dep.startsWith("signal.") ? [] : [dep];
+  if (!signal) {
+    return sourceById.has(dep)
+      ? [{ source: dep, active: epaperSourceActive(sourceById.get(dep)?.value) }]
+      : [];
+  }
   seen.add(dep);
-  return signal.deps.flatMap((signalDep) => expandEpaperSourceDeps(signalDep, signalById, seen));
+  const gateStates = signal.deps
+    .filter((signalDep) => !signalById.has(signalDep) && !sourceById.has(signalDep) && signalDep !== "time.tick")
+    .map((signalDep) => transitiveDepActiveById.get(signalDep))
+    .filter((active): active is boolean => typeof active === "boolean");
+  const gateActive = gateStates.length ? gateStates.some(Boolean) : true;
+  return signal.deps.flatMap((signalDep) =>
+    expandEpaperSourceDeps(signalDep, signalById, sourceById, transitiveDepActiveById, new Set(seen))
+      .map((expanded) => ({ ...expanded, active: expanded.active && gateActive })),
+  );
+}
+
+function expandEpaperCauseDeps(
+  dep: string,
+  signalById: Map<string, Snapshot["signals"][number]>,
+  sourceById: Map<string, Snapshot["sources"][number]>,
+  seen = new Set<string>(),
+): string[] {
+  if (dep === "time.tick" || seen.has(dep)) return [];
+  const signal = signalById.get(dep);
+  if (!signal) return sourceById.has(dep) ? [dep] : [];
+  seen.add(dep);
+  return signal.deps.flatMap((signalDep) => expandEpaperCauseDeps(signalDep, signalById, sourceById, new Set(seen)));
+}
+
+function uniqueEpaperCauseSources(values: string[], limit: number) {
+  return [...new Set(values.filter(Boolean))].slice(0, limit);
+}
+
+function uniqueEpaperDepStates(values: EpaperExpandedDep[], limit: number): EpaperExpandedDep[] {
+  const activeBySource = new Map<string, boolean>();
+  for (const value of values) {
+    activeBySource.set(value.source, Boolean(activeBySource.get(value.source)) || value.active);
+  }
+  return [...activeBySource.entries()].slice(0, limit).map(([source, active]) => ({ source, active }));
+}
+
+function epaperTransitiveDepActivity(snapshot: Snapshot | null, now: number) {
+  return new Map((snapshot?.pulses ?? []).map((pulse) => [
+    pulse.source,
+    now < pulse.lastTriggeredAt + pulse.duration,
+  ]));
 }
 
 function inferEpaperRuleOutputs(ruleName: string, layers: Snapshot["layers"]) {
@@ -1763,6 +1873,32 @@ function inferEpaperRuleOutputs(ruleName: string, layers: Snapshot["layers"]) {
   });
   if (matched.length) return matched;
   return layers.flatMap((layer) => layer.surfaced?.layer === "automation" ? [layer.target] : []);
+}
+
+function epaperRuleOutputWrites(rule: Snapshot["rules"][number], layers: Snapshot["layers"]) {
+  const writes = Array.isArray(rule.outputWrites) ? rule.outputWrites : [];
+  if (writes.length) return writes;
+  const outputs = rule.outputs?.length ? rule.outputs : inferEpaperRuleOutputs(rule.name, layers);
+  return outputs.map((target) => ({
+    target,
+    hasOutput: ruleHasEpaperAutomationOpinion(rule.name, layers.find((layer) => layer.target === target)),
+  }));
+}
+
+function ruleHasEpaperAutomationOpinion(ruleName: string, layer: Snapshot["layers"][number] | undefined) {
+  const automationLayer = layer?.layers?.find((item) => item.layer === "automation");
+  if (!automationLayer) return layer?.surfaced?.layer === "automation" && layer.surfaced.output.state !== null;
+  if (automationLayer.items?.length) {
+    return automationLayer.items.some((item) => item.key === ruleName || item.output.writer === ruleName);
+  }
+  return automationLayer.output.writer === ruleName || automationLayer.output.reason === ruleName;
+}
+
+function eventActionHasEpaperOpinion(layer: Snapshot["layers"][number] | undefined) {
+  return Boolean(
+    layer?.layers?.some((item) => item.layer !== "automation" && item.layer !== "default")
+    || (layer?.surfaced && layer.surfaced.layer !== "automation" && layer.surfaced.layer !== "default"),
+  );
 }
 
 function epaperVisibleFlowOutputs(outputs: string[], targetById: Map<string, Snapshot["targets"][number]>) {
@@ -1806,8 +1942,9 @@ function compareEpaperSourcePriority(left: string, right: string) {
 function epaperSourcePriority(label: string) {
   const lower = label.toLowerCase();
   if (lower.includes(".paddle.") || lower.includes(".button.")) return 0;
-  if (lower.endsWith(".activelayer")) return 1;
-  return 2;
+  if (lower.endsWith(".presence") || lower.endsWith(".open") || lower.includes(".door.")) return 1;
+  if (lower.endsWith(".activelayer")) return 2;
+  return 3;
 }
 
 function groupEpaperSourceLabels(labels: string[], activeSources: Set<string>) {
@@ -1970,6 +2107,7 @@ function epaperPreviewFingerprint(snapshot: Snapshot | null, display: EpaperDisp
   const layerByTarget = new Map((roomSnapshot?.layers ?? []).map((layer) => [layer.target, layer]));
   const matter = snapshot?.providers.find((provider) => provider.name === "matter");
   const bindingByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
+  const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, now);
   return stableStringify({
     display: display.id,
     stats: epaperStats(snapshot, display.stats ?? [], now),
@@ -1990,8 +2128,11 @@ function epaperPreviewFingerprint(snapshot: Snapshot | null, display: EpaperDisp
       name: rule.name,
       enabled: rule.enabled,
       deps: rule.deps,
+      causes: rule.causes,
       outputs: rule.outputs,
-      depValues: rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById)).map((dep) => [dep, sourceById.get(dep)?.value ?? signalById.get(dep)?.value]),
+      depValues: rule.deps
+        .flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById))
+        .map((dep) => [dep.source, sourceById.get(dep.source)?.value, dep.active]),
     })),
     events: (roomSnapshot?.eventActions ?? []).map((action) => ({
       name: action.name,
@@ -2732,13 +2873,24 @@ function DataPanel({ title, accent, count, children }: { title: string; accent: 
 
 function LayerLine({ layer }: { layer?: { layer: string; output: { state: unknown; reason?: string } } | null }) {
   if (!layer) return null;
-  return <div className="truncate text-xs text-gaia-muted">{layer.output.reason ?? JSON.stringify(layer.output.state)}</div>;
+  const label = layerOutputLabel(layer.output);
+  return <div className="truncate text-xs text-gaia-muted" title={label}>{label}</div>;
 }
 
 function LayerBadge({ layer }: { layer?: string }) {
   if (!layer) return null;
   const color = layer === "automation" ? "bg-gaia-green/30" : layer === "webOverride" || layer === "override" ? "bg-gaia-yellow" : "bg-gaia-paper";
   return <span className={`gaia-chip ${color}`}>{layer}</span>;
+}
+
+function layerOutputLabel(output: { state?: unknown; reason?: unknown; writer?: unknown }) {
+  if (typeof output.reason === "string" && output.reason) {
+    return output.reason;
+  }
+  if (typeof output.writer === "string" && output.writer) {
+    return output.writer;
+  }
+  return formatValue(output.state);
 }
 
 function formatRunTime(value?: number, minuteOnly = false) {

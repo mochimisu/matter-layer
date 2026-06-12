@@ -29,9 +29,11 @@ export type DeviceRuntime = {
   writeLayer(target: TargetId, layer: LayerName, output: LayerOutput | null, key?: string): void;
   clearLayer(target: TargetId, layer: LayerName, key?: string): void;
   hasLayer(target: TargetId, layer: LayerName, key?: string): boolean;
+  layerOutput(target: TargetId, layer: LayerName, key?: string): LayerOutput | undefined;
   surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput; since?: number } | null;
   updateSource(update: SourceUpdate): void;
   enqueueApply(target: TargetId): void;
+  forceApplyNext(target: TargetId): void;
 };
 
 export type ActiveLayerState = {
@@ -107,6 +109,10 @@ export class LayerSlot {
   clear() {
     runtime().clearLayer(this.target, this.layer, this.key);
   }
+
+  read() {
+    return runtime().layerOutput(this.target, this.layer, this.key);
+  }
 }
 
 export class LayerProxy {
@@ -173,6 +179,10 @@ export class TargetDevice {
     };
     write();
     return write;
+  }
+
+  forceApplyNext() {
+    runtime().forceApplyNext(this.key);
   }
 
   endpoint(endpointId: number) {

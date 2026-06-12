@@ -1,7 +1,7 @@
 import type { LayerOutput } from "./types";
 import { readClock, readClockUntracked } from "./builtins";
 import { Signal, signal } from "./signals";
-import { nextCallId, recordRead } from "./tracking";
+import { currentReads, nextCallId, recordCause, recordRead } from "./tracking";
 import { scheduleAt } from "./scheduler";
 
 type PulseState = {
@@ -19,6 +19,7 @@ type DelayState<T> = {
 type HoldState = {
   wasActive?: boolean;
   clearAt?: number;
+  causes?: string[];
 };
 
 const runtimeState = globalThis as typeof globalThis & {
@@ -71,6 +72,7 @@ export const state = {
 
   wasTrueFor(value: boolean, duration: string) {
     const key = nextCallId("wasTrueFor");
+    const causes = currentInputCauses();
     recordRead(key);
     const entry = truth.get(key) ?? {};
     const now = readClockUntracked();
@@ -83,6 +85,7 @@ export const state = {
         scheduleAt(thresholdAt, key);
         return false;
       }
+      for (const cause of causes) recordCause(cause);
       return true;
     }
     if (entry.wasTrueSince !== undefined || entry.becameTrueAt !== undefined) {
@@ -93,11 +96,13 @@ export const state = {
 
   holdTrue(key: string, value: boolean, delay: string) {
     const source = `holdTrue.${key}`;
+    const causes = currentInputCauses();
     recordRead(source);
     const now = readClockUntracked();
     const entry = holds.get(source) ?? {};
     if (value) {
-      holds.set(source, { wasActive: true });
+      for (const cause of causes) recordCause(cause);
+      holds.set(source, { wasActive: true, causes });
       return true;
     }
     if (!entry.wasActive) {
@@ -107,6 +112,7 @@ export const state = {
     if (now < entry.clearAt) {
       holds.set(source, entry);
       scheduleAt(entry.clearAt, source);
+      for (const cause of entry.causes ?? []) recordCause(cause);
       return true;
     }
     holds.delete(source);
@@ -229,6 +235,15 @@ export function parseDuration(input: string) {
   if (unit === "s") return value * 1000;
   if (unit === "m") return value * 60_000;
   return value * 3_600_000;
+}
+
+function currentInputCauses() {
+  return [...currentReads()].filter((source) =>
+    source !== "time.tick"
+    && !source.startsWith("holdTrue.")
+    && !source.startsWith("wasTrueFor.")
+    && !source.startsWith("pulse.")
+  );
 }
 
 function parseTime(input: string) {

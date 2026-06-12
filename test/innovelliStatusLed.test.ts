@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { innovelli } from "../src/devices/innovelli";
 import { defineRoomDevices, defineRoomRules } from "../src/runtime/dsl";
 import { MatterLayerRuntime } from "../src/runtime/engine";
@@ -87,7 +87,7 @@ describe("Inovelli status LED rule", () => {
     ).toMatchObject({
       layer: "automation",
       output: {
-        state: { power: "on", color: "blue", level: "10%" },
+        state: { power: "on", color: "purple", level: "10%" },
       },
     });
     runtime.stop();
@@ -126,6 +126,77 @@ describe("Inovelli status LED rule", () => {
     expect(override?.output.expiresAt).toBeLessThanOrEqual(Date.now() + 30 * 60_000);
 
     runtime.stop();
+  });
+
+  it("clears a matching manual paddle override on repeated press", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light");
+        }),
+      ],
+      rules: [
+        defineRoomRules("room", ({ room, rule }) => {
+          rule("light", () => room.light.auto(false));
+        }),
+      ],
+    });
+    await runtime.start();
+
+    runtime.dispatchEvent("room.light.paddle.up.singlePress");
+    await tick();
+    expect(runtime.layers.surface("room.light")).toMatchObject({
+      layer: "override",
+      output: { state: { power: "on" }, writer: "manual" },
+    });
+
+    runtime.dispatchEvent("room.light.paddle.up.singlePress");
+    await tick();
+    expect(runtime.layers.surface("room.light")).toMatchObject({
+      layer: "default",
+      output: { state: { power: "off" } },
+    });
+
+    runtime.stop();
+  });
+
+  it("clears paddle override LEDs after the override expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-10T12:00:00-07:00"));
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    try {
+      runtime.loadModules({
+        devices: [
+          defineRoomDevices("room", ({ room }) => {
+            room.light = innovelli("room.light");
+          }),
+        ],
+        rules: [
+          defineRoomRules("room", ({ room, rule }) => {
+            rule("light", () => room.light.auto(false));
+          }),
+        ],
+      });
+      await runtime.start();
+
+      runtime.dispatchEvent("room.light.paddle.up.singlePress");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtime.layers.surface("room.light.endpoint.6.statusLed")).toMatchObject({
+        layer: "automation",
+        output: { state: { power: "on", color: "purple", level: "50%" } },
+      });
+
+      await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
+
+      expect(runtime.layers.surface("room.light.endpoint.6.statusLed")).toMatchObject({
+        layer: "default",
+        output: { state: { power: "off" } },
+      });
+    } finally {
+      runtime.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("applies the latest active layer after clearing a web override while LED commands are in flight", async () => {

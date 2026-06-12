@@ -6,7 +6,7 @@ import type { LayerName } from "../runtime/types";
 const ledColors: Partial<Record<LayerName, string>> = {
   automation: "green",
   webOverride: "purple",
-  override: "blue",
+  override: "purple",
 };
 
 export function innovelli(key: string, options: LightOptions = {}): Light {
@@ -70,6 +70,11 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
   });
 
   function manualOverride(value: string, ttl: string = "30m") {
+    const current = device.layer.override?.read();
+    if (current?.writer === "manual" && statePower(current.state) === value) {
+      device.layer.override?.clear();
+      return;
+    }
     const expiresAt = Date.now() + parseDuration(ttl);
     device.layer.override = {
       state: { power: value },
@@ -92,6 +97,13 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
   ]);
 
   return device;
+}
+
+function statePower(state: unknown) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return undefined;
+  }
+  return (state as Record<string, unknown>).power;
 }
 
 function ledStateFor(active: {

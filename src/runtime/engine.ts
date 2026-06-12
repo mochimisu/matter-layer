@@ -11,7 +11,7 @@ import { SourceRef } from "./sources";
 import { track } from "./tracking";
 import { setActiveRuleName, setDeviceRuntime, type DeviceRuntime } from "./devices";
 import { Signal } from "./signals";
-import { clockSource } from "./builtins";
+import { clockSource, minuteSource } from "./builtins";
 import { setSchedulerRuntime } from "./scheduler";
 import { parseDuration } from "./state";
 import { pulseSnapshot } from "./state";
@@ -49,6 +49,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   private readonly applyingTargets = new Set<string>();
   private readonly pendingCommands = new Map<string, DesiredCommand>();
   private readonly scheduled = new Map<string, NodeJS.Timeout>();
+  private readonly forceApplyTargets = new Set<string>();
   private nextMatterLogId = 0;
   private clock?: NodeJS.Timeout;
   private activeRule?: string;
@@ -58,7 +59,10 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
 
   constructor(readonly options: { dryRun?: boolean; overrideDbPath?: string | null } = {}) {
     this.registerSource(clockSource);
-    clockSource.update(Date.now(), Date.now());
+    this.registerSource(minuteSource);
+    const now = Date.now();
+    clockSource.update(now, now);
+    minuteSource.update(floorToMinute(now), now);
     setSchedulerRuntime(this);
     if (options.overrideDbPath) {
       this.overridePersistence = new OverridePersistence(options.overrideDbPath);
@@ -153,6 +157,10 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     return Boolean(this.layers.layer(target, layer, key));
   }
 
+  layerOutput(target: string, layer: LayerName, key?: string) {
+    return this.layers.layer(target, layer, key);
+  }
+
   surfaceLayer(target: string) {
     return this.layers.surface(target);
   }
@@ -165,14 +173,22 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     if (!command) {
       return;
     }
-    if (this.commandMatchesObserved(command)) {
+    const forceApply = this.forceApplyTargets.delete(target);
+    if (!forceApply && this.commandMatchesObserved(command)) {
       this.layers.shouldApply(command);
       return;
     }
-    if (!this.layers.shouldApply(command)) {
+    if (!forceApply && !this.layers.shouldApply(command)) {
       return;
     }
+    if (forceApply) {
+      this.layers.shouldApply(command);
+    }
     this.queueCommand(command);
+  }
+
+  forceApplyNext(target: string) {
+    this.forceApplyTargets.add(target);
   }
 
   async applyCommand(command: DesiredCommand): Promise<CommandResult> {
@@ -364,6 +380,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       setActiveRuleName(rule.name);
       const result = track(rule.run, rule.name);
       rule.deps = result.deps;
+      rule.causes = result.causes;
       rule.lastRunAt = Date.now();
       rule.lastError = undefined;
       this.emit({ type: "rule.run", name });
@@ -524,6 +541,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         name: rule.name,
         enabled: rule.enabled,
         deps: [...rule.deps],
+        causes: [...rule.causes],
         outputs: [...rule.outputs],
         outputWrites: [...rule.outputWrites.entries()].map(([target, hasOutput]) => ({ target, hasOutput })),
         lastRunAt: rule.lastRunAt,
@@ -682,8 +700,23 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         provider: "timer",
         observedAt: Date.now(),
       });
+      this.updateMinuteSource();
       this.expireLayers();
     }, 100);
+  }
+
+  private updateMinuteSource() {
+    const now = Date.now();
+    const minute = floorToMinute(now);
+    if (minuteSource.peek() === minute) {
+      return;
+    }
+    this.updateSource({
+      source: minuteSource.source,
+      value: minute,
+      provider: "timer",
+      observedAt: now,
+    });
   }
 
   private expireLayers() {
@@ -695,6 +728,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         }
         for (const layer of expired) {
           this.emit({ type: "layer.changed", target, layer, output: null });
+          this.updateActiveLayerSource(target);
         }
         this.enqueueApply(target);
       }
@@ -773,6 +807,10 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
 
 export function sourceBindings(runtime: MatterLayerRuntime): SourceBinding[] {
   return [...runtime.sources.values()].map((source) => source.binding);
+}
+
+function floorToMinute(value: number) {
+  return Math.floor(value / 60_000) * 60_000;
 }
 
 function roomOf(id: string) {

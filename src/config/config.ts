@@ -5,6 +5,7 @@ export type AppConfig = {
   matterWsUrl: string;
   dryRun: boolean;
   matterEnabled: boolean;
+  matterRemoteKeepaliveEnabled: boolean;
   haWsUrl: string;
   haToken?: string;
   haEnabled: boolean;
@@ -25,6 +26,7 @@ export function loadConfig(env = process.env): AppConfig {
     matterWsUrl: env.MATTER_LAYER_MATTER_WS_URL ?? "ws://127.0.0.1:5580/ws",
     dryRun: env.MATTER_LAYER_DRY_RUN === "1",
     matterEnabled: env.MATTER_LAYER_MATTER_ENABLED !== "0",
+    matterRemoteKeepaliveEnabled: envFlag(env.MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED ?? env.MATTER_REMOTE_KEEPALIVE_ENABLE, true),
     haWsUrl: env.MATTER_LAYER_HA_WS_URL ?? "ws://127.0.0.1:8123/api/websocket",
     haToken: env.MATTER_LAYER_HA_TOKEN ?? env.MATTER_HA_TOKEN,
     haEnabled: env.MATTER_LAYER_HA_ENABLED !== "0",
@@ -33,6 +35,11 @@ export function loadConfig(env = process.env): AppConfig {
     rulesModule: env.MATTER_LAYER_RULES_MODULE,
     matterBindings: loadMatterBindings(env),
   };
+}
+
+function envFlag(value: string | undefined, defaultValue: boolean) {
+  if (value === undefined) return defaultValue;
+  return value.toLowerCase() !== "0" && value.toLowerCase() !== "false";
 }
 
 function loadMatterBindings(env: NodeJS.ProcessEnv): Record<string, MatterBinding> {

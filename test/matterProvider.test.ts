@@ -851,6 +851,43 @@ describe("MatterProvider command translation", () => {
     }
   });
 
+  it("does not start the remote keepalive loop when disabled", () => {
+    const provider = new MatterProvider({
+      url: "ws://example.invalid",
+      dryRun: false,
+      remoteKeepaliveEnabled: false,
+    });
+    const internals = provider as any;
+
+    internals.startRemoteKeepaliveLoop();
+
+    expect(internals.remoteKeepaliveTimer).toBeUndefined();
+  });
+
+  it("toggles remote keepalive at runtime", () => {
+    const provider = new MatterProvider({
+      url: "ws://example.invalid",
+      dryRun: false,
+      remoteKeepaliveEnabled: false,
+    });
+    const internals = provider as any;
+    let changed = 0;
+    internals.runtime = {
+      notifyProviderChanged() {
+        changed += 1;
+      },
+    };
+
+    provider.setRemoteKeepaliveEnabled(true);
+    expect(provider.snapshot()).toMatchObject({ remoteKeepaliveEnabled: true });
+    expect(internals.remoteKeepaliveTimer).toBeDefined();
+
+    provider.setRemoteKeepaliveEnabled(false);
+    expect(provider.snapshot()).toMatchObject({ remoteKeepaliveEnabled: false });
+    expect(internals.remoteKeepaliveTimer).toBeUndefined();
+    expect(changed).toBe(2);
+  });
+
   it("dedupes remote keepalive pings by Matter node", async () => {
     const previousMax = process.env.MATTER_REMOTE_KEEPALIVE_MAX_PER_PASS;
     const previousPerNode = process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC;

@@ -1,6 +1,6 @@
 import { signal, Signal } from "./signals";
 import { state } from "./state";
-import { clockSource } from "./builtins";
+import { clockSource, minuteSource } from "./builtins";
 import type { LayerOutput, RuleRegistration } from "./types";
 
 export type RoomModule = {
@@ -50,6 +50,10 @@ export function pulse<T>(value: T, options: { activeWhen?: T; for: string }) {
 
 export const time = {
   tick: signal(() => clockSource.read() ?? Date.now()),
+  minute: minuteSource,
+  minuteBetween(start: string, end: string) {
+    return timeBetween(minuteSource.read(), start, end);
+  },
 };
 
 export function throttle<T>(value: T | Signal<T>, options: { window: string; mode: "latest" }) {
@@ -95,9 +99,25 @@ export function createRuleRegistration(name: string, run: () => void): RuleRegis
     run,
     enabled: true,
     deps: new Set(),
+    causes: new Set(),
     outputs: new Set(),
     outputWrites: new Map(),
   };
+}
+
+function timeBetween(now: number | undefined, start: string, end: string) {
+  const date = new Date(now ?? Date.now());
+  const current = date.getHours() * 60 + date.getMinutes();
+  const startMinute = parseTime(start);
+  const endMinute = parseTime(end);
+  if (startMinute === endMinute) return true;
+  if (startMinute < endMinute) return current >= startMinute && current < endMinute;
+  return current >= startMinute || current < endMinute;
+}
+
+function parseTime(input: string) {
+  const [hour, minute = "0"] = input.split(":");
+  return Number(hour) * 60 + Number(minute);
 }
 
 export function isLayerOutput(value: unknown): value is LayerOutput {

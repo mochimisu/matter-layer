@@ -128,3 +128,6 @@ MATTER_LAYER_RULES_MODULE=$PWD/my-house/rules.ts \
 MATTER_LAYER_BINDINGS_FILE=$PWD/my-house/bindings.json \
 npm run dev
 ```
+
+Set `MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED=0` to disable periodic
+Matter `ping_node` keepalive probes for remotes marked with `remoteKeepalive`.

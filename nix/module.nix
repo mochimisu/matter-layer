@@ -54,6 +54,12 @@ in {
       description = "Connect to the Matter websocket provider.";
     };
 
+    matterRemoteKeepaliveEnabled = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Send periodic Matter ping_node keepalive probes to targets marked for remote keepalive.";
+    };
+
     dryRun = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -136,6 +142,7 @@ in {
           MATTER_LAYER_PORT = toString cfg.port;
           MATTER_LAYER_MATTER_WS_URL = cfg.matterWsUrl;
           MATTER_LAYER_MATTER_ENABLED = if cfg.matterEnabled then "1" else "0";
+          MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED = if cfg.matterRemoteKeepaliveEnabled then "1" else "0";
           MATTER_LAYER_DRY_RUN = if cfg.dryRun then "1" else "0";
           MATTER_LAYER_BINDINGS_FILE = bindingsFile;
           MATTER_LAYER_DB_PATH = cfg.dbPath;

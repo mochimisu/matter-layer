@@ -2,6 +2,7 @@ import { SourceRef } from "./sources";
 
 const builtinState = globalThis as typeof globalThis & {
   __matterLayerClockSource?: SourceRef<number>;
+  __matterLayerMinuteSource?: SourceRef<number>;
 };
 
 export const clockSource =
@@ -10,6 +11,15 @@ export const clockSource =
     source: "time.tick",
     key: "time",
     property: "tick",
+    provider: "timer",
+  }));
+
+export const minuteSource =
+  builtinState.__matterLayerMinuteSource ??
+  (builtinState.__matterLayerMinuteSource = new SourceRef<number>({
+    source: "time.minute",
+    key: "time",
+    property: "minute",
     provider: "timer",
   }));
 

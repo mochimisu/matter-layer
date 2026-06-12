@@ -39,7 +39,7 @@ export type Snapshot = {
       }>;
     };
   }>;
-  rules: Array<{ name: string; enabled: boolean; deps: string[]; outputs?: string[]; lastRunAt?: number; lastError?: string }>;
+  rules: Array<{ name: string; enabled: boolean; deps: string[]; causes?: string[]; outputs?: string[]; outputWrites?: Array<{ target: string; hasOutput: boolean }>; lastRunAt?: number; lastError?: string }>;
   layers: Array<{
     target: string;
     layers: Array<{
@@ -82,6 +82,7 @@ export type Snapshot = {
       connected?: boolean;
       nodeCount?: number;
       lastMessageAt?: number;
+      remoteKeepaliveEnabled?: boolean;
       resolved?: Array<{ key: string; nodeId: number; label?: string; mac?: string; available?: boolean; offlineSince?: number; rssi?: number; lastProbeAt?: number }>;
       unresolvedSources?: string[];
       unresolvedTargets?: string[];

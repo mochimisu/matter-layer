@@ -201,7 +201,11 @@ export class LayerStore {
 
 function mergeState(base: unknown, next: unknown) {
   if (isRecord(base) && isRecord(next)) {
-    return { ...base, ...next };
+    const merged = { ...base, ...next };
+    if (next.power === "off" || next.power === false) {
+      delete merged.level;
+    }
+    return merged;
   }
   return next ?? base;
 }

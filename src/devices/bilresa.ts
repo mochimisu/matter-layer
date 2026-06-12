@@ -5,6 +5,7 @@ import type { CoverGroup, Remote } from "matter-layer/rules";
 type BlindMotion = "idle" | "up" | "down";
 
 const directRemoteMinDelta = 1;
+const remoteRepeatWindowMs = 2000;
 const selfCommandWindowMs = 8000;
 const manualOverrideTtl = "30m";
 const manualReason = "Manual blind input";
@@ -56,13 +57,29 @@ function createBlindIntents(covers: CoverGroup) {
   covers.state.motion ??= state.optimistic<BlindMotion>("idle", { ttl: "90s" });
   const lastPositions = new Map<string, number>();
   let selfCommandUntil = 0;
+  let lastRemoteMotionAt = 0;
 
   const markSelfCommand = () => {
     selfCommandUntil = Date.now() + selfCommandWindowMs;
   };
 
-  const writeManual = (value: Record<string, unknown>) => {
+  const clearMatchingManual = (value: Record<string, unknown>) => {
+    if (!covers.covers.every((cover) => manualOverrideMatches(cover.layer.override?.read(), value))) {
+      return false;
+    }
     for (const cover of covers.covers) {
+      cover.layer.override?.clear();
+    }
+    covers.state.motion.set("idle");
+    return true;
+  };
+
+  const writeManual = (value: Record<string, unknown>) => {
+    if (clearMatchingManual(value)) {
+      return;
+    }
+    for (const cover of covers.covers) {
+      cover.forceApplyNext();
       cover.layer.override = state.expiring(
         value,
         { layer: "override", reason: manualReason, writer: "manual" },
@@ -73,12 +90,14 @@ function createBlindIntents(covers: CoverGroup) {
 
   const open = () => {
     covers.state.motion.set("up");
+    lastRemoteMotionAt = Date.now();
     markSelfCommand();
     writeManual({ position: "open" });
   };
 
   const close = () => {
     covers.state.motion.set("down");
+    lastRemoteMotionAt = Date.now();
     markSelfCommand();
     writeManual({ position: "closed" });
   };
@@ -115,20 +134,51 @@ function createBlindIntents(covers: CoverGroup) {
 
   return {
     remoteOpen() {
+      if (clearMatchingManual({ position: "open" })) {
+        return;
+      }
       if (covers.state.motion.value === "up") {
-        stop();
+        if (Date.now() - lastRemoteMotionAt < remoteRepeatWindowMs) {
+          open();
+        } else {
+          stop();
+        }
         return;
       }
       open();
     },
     remoteClose() {
+      if (clearMatchingManual({ position: "closed" })) {
+        return;
+      }
       if (covers.state.motion.value === "down") {
-        stop();
+        if (Date.now() - lastRemoteMotionAt < remoteRepeatWindowMs) {
+          close();
+        } else {
+          stop();
+        }
         return;
       }
       close();
     },
   };
+}
+
+function manualOverrideMatches(output: unknown, value: Record<string, unknown>) {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return false;
+  }
+  const layerOutput = output as { state?: unknown; writer?: unknown };
+  return layerOutput.writer === "manual" && stateMatches(layerOutput.state, value);
+}
+
+function stateMatches(state: unknown, value: Record<string, unknown>) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return false;
+  }
+  const record = state as Record<string, unknown>;
+  const keys = Object.keys(value);
+  return keys.every((key) => record[key] === value[key]);
 }
 
 function numericPosition(value: unknown) {

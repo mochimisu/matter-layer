@@ -65,6 +65,7 @@ export class MatterProvider implements ProviderAdapter {
       url: string;
       dryRun?: boolean;
       enabled?: boolean;
+      remoteKeepaliveEnabled?: boolean;
       bindings?: Record<string, MatterBinding>;
     },
   ) {}
@@ -293,6 +294,7 @@ export class MatterProvider implements ProviderAdapter {
       url: this.options.url,
       nodeCount: this.nodeCount,
       lastMessageAt: this.lastMessageAt,
+      remoteKeepaliveEnabled: this.remoteKeepaliveEnabled(),
       resolved: [...this.nodeByKey.entries()].map(([key, nodeId]) => ({
         key,
         nodeId,
@@ -309,6 +311,22 @@ export class MatterProvider implements ProviderAdapter {
         .map((source) => source.source),
       unresolvedTargets: this.options.enabled === false ? [] : [...this.targets.keys()].filter((target) => !this.nodeByKey.has(target)),
     };
+  }
+
+  setRemoteKeepaliveEnabled(enabled: boolean) {
+    this.options.remoteKeepaliveEnabled = enabled;
+    if (!enabled && this.remoteKeepaliveTimer) {
+      clearInterval(this.remoteKeepaliveTimer);
+      this.remoteKeepaliveTimer = undefined;
+    }
+    if (enabled) {
+      this.startRemoteKeepaliveLoop();
+    }
+    this.runtime?.notifyProviderChanged?.(this.name);
+  }
+
+  private remoteKeepaliveEnabled() {
+    return this.options.remoteKeepaliveEnabled !== false;
   }
 
   private connect() {
@@ -696,7 +714,9 @@ export class MatterProvider implements ProviderAdapter {
   }
 
   private startRemoteKeepaliveLoop() {
-    const enabled = process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "0" && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "false";
+    const enabled = this.remoteKeepaliveEnabled()
+      && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "0"
+      && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "false";
     if (!enabled || this.remoteKeepaliveTimer) {
       return;
     }
