@@ -13,6 +13,28 @@ async function tick() {
 }
 
 describe("Inovelli status LED rule", () => {
+  it("defaults the status LED to dim green", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light");
+        }),
+      ],
+      rules: [],
+    });
+    await runtime.start();
+
+    expect(runtime.layers.surface("room.light.endpoint.6.statusLed")).toMatchObject({
+      layer: "default",
+      output: {
+        state: { power: "on", color: "green", level: "2%" },
+        reason: "Status LED idle",
+      },
+    });
+    runtime.stop();
+  });
+
   it("uses full brightness for automation on when no explicit level is configured", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     runtime.loadModules({
@@ -191,7 +213,7 @@ describe("Inovelli status LED rule", () => {
 
       expect(runtime.layers.surface("room.light.endpoint.6.statusLed")).toMatchObject({
         layer: "default",
-        output: { state: { power: "off" } },
+        output: { state: { power: "on", color: "green", level: "2%" } },
       });
     } finally {
       runtime.stop();

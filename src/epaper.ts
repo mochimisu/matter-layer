@@ -246,19 +246,14 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
   const signalById = new Map(snapshot.signals.map((signal) => [signal.id, signal]));
   const transitiveDepActiveById = epaperTransitiveDepActivity(snapshot, now);
   const activeFlowSources = new Set<string>();
-  const causalFlowSources = new Set<string>();
   const activeFlowSinks = new Set<string>();
   const automations = [
     ...roomSnapshot.rules.map((rule) => {
       const deps = uniqueEpaperDepStates(rule.deps.flatMap((dep) => expandEpaperSourceDeps(dep, signalById, sourceById, transitiveDepActiveById)), 8);
-      const causes = uniqueEpaperCauseSources(rule.causes?.flatMap((dep) => expandEpaperCauseDeps(dep, signalById, sourceById)) ?? [], 8);
       const outputWrites = epaperRuleOutputWrites(rule, roomSnapshot.layers);
       const outputs = epaperVisibleFlowOutputs(outputWrites.map((write) => write.target), targetById);
       for (const dep of deps) {
         if (dep.active) activeFlowSources.add(epaperFlowLabel(dep.source, options.room, 48));
-      }
-      for (const cause of causes) {
-        causalFlowSources.add(epaperFlowLabel(cause, options.room, 48));
       }
       for (const output of outputs) {
         if (epaperOutputActive(layerByTarget.get(output)?.surfaced?.output.state)) activeFlowSinks.add(epaperFlowLabel(output, options.room, 48));
@@ -293,7 +288,7 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
     }),
   ].filter((automation) => automation.outputs.length > 0).slice(0, 6);
   const flowY = statCards.length ? 142 : 100;
-  const flow = buildEpaperFlow(automations, activeFlowSources, new Set([...activeFlowSources, ...causalFlowSources]), activeFlowSinks, flowY);
+  const flow = buildEpaperFlow(automations, activeFlowSources, activeFlowSinks, flowY);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${profile.width}" height="${profile.height}" viewBox="0 0 ${profile.width} ${profile.height}">
@@ -542,7 +537,6 @@ function renderFlowGraph(flow: EpaperFlow, profile: EpaperProfile, scaleX: numbe
 function buildEpaperFlow(
   automations: Array<{ enabled: boolean; deps: string[]; outputs: string[]; activeOutputs?: string[] }>,
   activeSources = new Set<string>(),
-  causalSources = activeSources,
   activeSinks = new Set<string>(),
   yStart = 100,
 ): EpaperFlow {
@@ -577,9 +571,7 @@ function buildEpaperFlow(
       automation.outputs.map((output) => ({
         sourceLabel: dep,
         sinkLabel: output,
-        enabled: automation.enabled
-          && causalSources.has(dep)
-          && (automation.activeOutputs ? automation.activeOutputs.includes(output) : true),
+        enabled: automation.enabled && (automation.activeOutputs ? automation.activeOutputs.includes(output) : true),
       })),
     ),
   );
@@ -649,23 +641,6 @@ function expandEpaperSourceDeps(
     expandEpaperSourceDeps(signalDep, signalById, sourceById, transitiveDepActiveById, new Set(seen))
       .map((expanded) => ({ ...expanded, active: expanded.active && gateActive })),
   );
-}
-
-function expandEpaperCauseDeps(
-  dep: string,
-  signalById: Map<string, Snapshot["signals"][number]>,
-  sourceById: Map<string, SnapshotSource>,
-  seen = new Set<string>(),
-): string[] {
-  if (dep === "time.tick" || seen.has(dep)) return [];
-  const signal = signalById.get(dep);
-  if (!signal) return sourceById.has(dep) ? [dep] : [];
-  seen.add(dep);
-  return signal.deps.flatMap((signalDep) => expandEpaperCauseDeps(signalDep, signalById, sourceById, new Set(seen)));
-}
-
-function uniqueEpaperCauseSources(values: string[], limit: number) {
-  return [...new Set(values.filter(Boolean))].slice(0, limit);
 }
 
 function uniqueEpaperDepStates(values: EpaperExpandedDep[], limit: number): EpaperExpandedDep[] {
@@ -996,7 +971,6 @@ function epaperRenderFingerprint(
       name: rule.name,
       enabled: rule.enabled,
       deps: rule.deps,
-      causes: "causes" in rule ? rule.causes : undefined,
       outputs: rule.outputs,
       outputWrites: "outputWrites" in rule ? rule.outputWrites : undefined,
       depValues: rule.deps

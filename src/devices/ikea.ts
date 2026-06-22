@@ -15,6 +15,29 @@ export function myggbett(key: string) {
   });
 }
 
+export function myggspray(key: string) {
+  return matterDevice(key, {
+    vendor: "IKEA of Sweden",
+    product: "MYGGSPRAY wrlss mtn sensor",
+    presence: {
+      path: "2/1030/0",
+      when: true,
+    },
+    lux: {
+      path: "1/1024/0",
+      encoding: "matter-illuminance",
+    },
+    status: {
+      path: "2/1030/0",
+      when: true,
+      values: {
+        true: { label: "active", tone: "active" },
+        false: { label: "clear", tone: "idle" },
+      },
+    },
+  });
+}
+
 export function kajplats(key: string) {
   return light(key, {
     vendor: "IKEA of Sweden",

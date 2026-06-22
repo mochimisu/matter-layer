@@ -117,7 +117,7 @@ describe("e-paper renderer", () => {
     expect(grayscaleSvg).not.toContain("stroke-dasharray=");
   });
 
-  it("only makes the active source path solid for an active automation opinion", () => {
+  it("makes every read input solid when an automation output has a layer opinion", () => {
     const snapshot = {
       sources: [
         { source: "office.near.presence", key: "office.near", property: "presence", value: true, since: 1 },
@@ -170,12 +170,11 @@ describe("e-paper renderer", () => {
 
     expect(svg).toContain(">near<");
     expect(svg).toContain(">far<");
-    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
-    expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
-    expect(svg.indexOf("stroke=\"#999999\"")).toBeLessThan(svg.lastIndexOf("stroke=\"#000\" stroke-opacity=\"1\""));
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(0);
+    expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(0);
   });
 
-  it("keeps a transitive pulse source dashed unless the pulse is active", () => {
+  it("does not use transitive pulse activity to decide wire solidity", () => {
     const snapshot = {
       sources: [
         { source: "office.door.open", key: "office.door", property: "open", value: true, since: 1 },
@@ -237,8 +236,8 @@ describe("e-paper renderer", () => {
 
     expect(svg).toContain(">door<");
     expect(svg).not.toContain("pulse");
-    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(1);
-    expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(1);
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(0);
+    expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(0);
 
     const activeSvg = renderRoomEpaperPanelSvg({
       ...snapshot,
@@ -249,6 +248,72 @@ describe("e-paper renderer", () => {
 
     expect(activeSvg.match(/stroke="#999999"/g) ?? []).toHaveLength(0);
     expect(activeSvg.match(/stroke-dasharray=/g) ?? []).toHaveLength(0);
+  });
+
+  it("dedupes duplicate wires as solid when any automation has an output opinion", () => {
+    const snapshot = {
+      sources: [
+        { source: "office.presence.presence", key: "office.presence", property: "presence", value: false, since: 1 },
+      ],
+      signals: [],
+      targets: [
+        {
+          target: "office.light",
+          key: "office.light",
+          provider: "matter",
+          capabilities: { power: true },
+        },
+      ],
+      rules: [
+        {
+          name: "office.light.off",
+          enabled: true,
+          deps: ["office.presence.presence"],
+          outputs: ["office.light"],
+          outputWrites: [{ target: "office.light", hasOutput: false }],
+          lastRunAt: 1,
+        },
+        {
+          name: "office.light.on",
+          enabled: true,
+          deps: ["office.presence.presence"],
+          outputs: ["office.light"],
+          outputWrites: [{ target: "office.light", hasOutput: true }],
+          lastRunAt: 1,
+        },
+      ],
+      layers: [
+        {
+          target: "office.light",
+          layers: [
+            {
+              layer: "automation",
+              output: { state: { power: "on" }, reason: "office.light.on", writer: "office.light.on" },
+              items: [
+                { key: "office.light.on", output: { state: { power: "on" }, reason: "office.light.on", writer: "office.light.on" } },
+              ],
+            },
+          ],
+          surfaced: { layer: "automation", output: { state: { power: "on" }, reason: "office.light.on" } },
+        },
+      ],
+      commands: [],
+      matterLog: [],
+      events: [],
+      eventActions: [],
+      pulses: [],
+      providers: [
+        { name: "matter", status: { enabled: false, connected: false, resolved: [] } },
+      ],
+    };
+
+    const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", title: "Room", now: 1 });
+
+    expect(svg).toContain(">presence<");
+    expect(svg).toContain(">light<");
+    expect(svg.match(/stroke="#999999"/g) ?? []).toHaveLength(0);
+    expect(svg.match(/stroke-dasharray=/g) ?? []).toHaveLength(0);
+    expect(svg.match(/stroke="#000" stroke-opacity="1"/g) ?? []).toHaveLength(1);
   });
 
   it("dashes active input wires when the rule wrote a null output", () => {

@@ -38,7 +38,7 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
   const led = device.endpoint(6).light("statusLed", {
     epaper: { excludeFromFlow: true },
   });
-  led.set({ power: "off" }, { layer: "default", reason: "Status LED idle" });
+  led.set({ power: "on", color: "green", level: "2%" }, { layer: "default", reason: "Status LED idle" });
   const dimmerLayer = activeLayer(device.key);
 
   device.auto = (
