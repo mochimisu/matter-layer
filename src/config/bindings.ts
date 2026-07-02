@@ -1,6 +1,7 @@
 export type MatterBinding = {
   label?: string;
   unique_id?: string;
+  unique_id_env?: string;
   mac?: string;
 };
 

@@ -18,6 +18,7 @@ export type AppConfig = {
 export type MatterBinding = {
   label?: string;
   unique_id?: string;
+  unique_id_env?: string;
   mac?: string;
 };
 
@@ -26,7 +27,7 @@ export function loadConfig(env = process.env): AppConfig {
     matterWsUrl: env.MATTER_LAYER_MATTER_WS_URL ?? "ws://127.0.0.1:5580/ws",
     dryRun: env.MATTER_LAYER_DRY_RUN === "1",
     matterEnabled: env.MATTER_LAYER_MATTER_ENABLED !== "0",
-    matterRemoteKeepaliveEnabled: envFlag(env.MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED ?? env.MATTER_REMOTE_KEEPALIVE_ENABLE, true),
+    matterRemoteKeepaliveEnabled: envFlag(env.MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED ?? env.MATTER_REMOTE_KEEPALIVE_ENABLE, false),
     haWsUrl: env.MATTER_LAYER_HA_WS_URL ?? "ws://127.0.0.1:8123/api/websocket",
     haToken: env.MATTER_LAYER_HA_TOKEN ?? env.MATTER_HA_TOKEN,
     haEnabled: env.MATTER_LAYER_HA_ENABLED !== "0",
@@ -51,7 +52,22 @@ function loadMatterBindings(env: NodeJS.ProcessEnv): Record<string, MatterBindin
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("MATTER_LAYER_BINDINGS_JSON must be an object");
   }
-  return parsed as Record<string, MatterBinding>;
+  return expandMatterBindings(parsed as Record<string, MatterBinding>, env);
+}
+
+function expandMatterBindings(bindings: Record<string, MatterBinding>, env: NodeJS.ProcessEnv): Record<string, MatterBinding> {
+  const expanded: Record<string, MatterBinding> = {};
+  for (const [key, binding] of Object.entries(bindings)) {
+    const next: MatterBinding = { ...binding };
+    if (!next.unique_id && next.unique_id_env) {
+      const value = env[next.unique_id_env]?.trim();
+      if (value) {
+        next.unique_id = value;
+      }
+    }
+    expanded[key] = next;
+  }
+  return expanded;
 }
 
 function readOptionalFile(file?: string) {

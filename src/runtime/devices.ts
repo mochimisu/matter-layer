@@ -41,6 +41,7 @@ export type ActiveLayerState = {
   state: Record<string, unknown> | unknown | null;
   power?: unknown;
   reason?: string;
+  writer?: string;
 } | null;
 
 export function setDeviceRuntime(runtime: DeviceRuntime | null) {
@@ -246,11 +247,12 @@ export function activeLayer(target: TargetId) {
           layer: surfaced.layer,
           state: surfaced.output.state,
           power: surfaced.output.state && typeof surfaced.output.state === "object" && !Array.isArray(surfaced.output.state)
-            ? (surfaced.output.state as Record<string, unknown>).power
-            : undefined,
-          reason: surfaced.output.reason,
-        }
-      : null,
+          ? (surfaced.output.state as Record<string, unknown>).power
+          : undefined,
+        reason: surfaced.output.reason,
+        writer: surfaced.output.writer,
+      }
+    : null,
     provider: "synthetic",
     observedAt: Date.now(),
   });
@@ -276,6 +278,11 @@ export class CoverDevice extends TargetDevice {
 
   onPositionChange(handler: (position: unknown, update: SourceUpdate) => void) {
     runtime().registerSourceHandler(`${this.key}.position`, (update) => handler(update.value, update));
+  }
+
+  onActiveLayerChange(handler: (active: ActiveLayerState, update: SourceUpdate) => void) {
+    activeLayer(this.key);
+    runtime().registerSourceHandler(`${this.key}.activeLayer`, (update) => handler(update.value as ActiveLayerState, update));
   }
 }
 

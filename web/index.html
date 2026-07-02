@@ -6,6 +6,15 @@
     <title>matter-layer</title>
   </head>
   <body>
+    <script>
+      try {
+        const theme = localStorage.getItem("matter-layer.theme");
+        const dark = theme === "dark" || theme === "oled-dark" || (!theme && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) {
+          document.body.classList.add("oled-dark");
+        }
+      } catch {}
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/App.tsx"></script>
   </body>

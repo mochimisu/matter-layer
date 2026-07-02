@@ -5,7 +5,9 @@ import {
   DoorClosed,
   DoorOpen,
   Lightbulb,
+  Moon,
   RefreshCw,
+  Sun,
   UserRound,
   UserRoundCheck,
 } from "lucide-react";
@@ -14,7 +16,7 @@ import { buildFlowLanes, layoutFlowLanes, type FlowNodeModel } from "./flowGraph
 import { applySnapshotDelta, type LiveMessage, type Snapshot } from "./snapshotDeltas";
 import "./style.css";
 
-type AppTab = "devices" | "details" | "graph" | "log" | "epaper";
+type AppTab = "devices" | "details" | "matter-devices" | "graph" | "log" | "epaper";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
 type DeviceStatus = { label: string; tone?: string; icon?: ReactNode; since?: number };
 type EpaperRenderEvent = {
@@ -26,7 +28,7 @@ type EpaperRenderEvent = {
 
 function tabFromLocation(): AppTab {
   const tab = new URLSearchParams(location.search).get("tab");
-  return tab === "graph" || tab === "details" || tab === "log" || tab === "epaper" ? tab : "devices";
+  return tab === "graph" || tab === "details" || tab === "matter-devices" || tab === "log" || tab === "epaper" ? tab : "devices";
 }
 
 function roomFromLocation() {
@@ -60,6 +62,21 @@ function deviceFromLocation() {
   return new URLSearchParams(location.search).get("deviceDetail");
 }
 
+function systemPrefersDark() {
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches === true;
+}
+
+function themeFromStorage() {
+  try {
+    const stored = localStorage.getItem("matter-layer.theme");
+    if (stored === "dark" || stored === "oled-dark") return { dark: true, explicit: true };
+    if (stored === "light") return { dark: false, explicit: true };
+    return { dark: systemPrefersDark(), explicit: false };
+  } catch {
+    return { dark: systemPrefersDark(), explicit: false };
+  }
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -71,6 +88,8 @@ function App() {
   const [selectedDevice, setSelectedDevice] = useState<string | null>(() => deviceFromLocation());
   const [now, setNow] = useState(() => Date.now());
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
+  const [theme, setTheme] = useState(() => themeFromStorage());
+  const darkMode = theme.dark;
 
   async function load() {
     const response = await fetch("/api/snapshot");
@@ -132,6 +151,26 @@ function App() {
     document.body.classList.toggle("graph-page-active", tab === "graph");
     return () => document.body.classList.remove("graph-page-active");
   }, [tab]);
+
+  useEffect(() => {
+    document.body.classList.toggle("oled-dark", darkMode);
+    if (theme.explicit) {
+      try {
+        localStorage.setItem("matter-layer.theme", darkMode ? "dark" : "light");
+      } catch {}
+    }
+    return () => document.body.classList.remove("oled-dark");
+  }, [darkMode, theme.explicit]);
+
+  useEffect(() => {
+    if (theme.explicit || !window.matchMedia) return undefined;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    function syncSystemTheme(event: MediaQueryListEvent) {
+      setTheme({ dark: event.matches, explicit: false });
+    }
+    media.addEventListener("change", syncSystemTheme);
+    return () => media.removeEventListener("change", syncSystemTheme);
+  }, [theme.explicit]);
 
   useEffect(() => {
     if (!pageVisible) return undefined;
@@ -348,6 +387,7 @@ function App() {
   const tabs = [
     { id: "devices" as const, label: "Devices", title: "Devices" },
     { id: "details" as const, label: "Details", title: "Details" },
+    { id: "matter-devices" as const, label: "Matter Devices", title: "Matter Devices" },
     { id: "graph" as const, label: "Graph", title: "Graph" },
     { id: "log" as const, label: "Log", title: "Matter Log" },
     { id: "epaper" as const, label: "E-Paper", title: "E-Paper Preview" },
@@ -363,13 +403,31 @@ function App() {
               <div className="header-subtitle">Matter Control Plane</div>
             </div>
             <div className="header-summary">
+              <button
+                type="button"
+                className="theme-toggle"
+                title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+                aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+                aria-pressed={darkMode}
+                onClick={() => setTheme((current) => ({ dark: !current.dark, explicit: true }))}
+              >
+                {darkMode ? <Moon size={14} strokeWidth={2.6} /> : <Sun size={14} strokeWidth={2.6} />}
+                <span>{darkMode ? "Dark mode" : "Light mode"}</span>
+              </button>
               <div className="header-matter-state">
                 <span>Matter</span>
-                <StatusPill status={matter?.status} now={now} />
+                <button
+                  type="button"
+                  className="header-status-button"
+                  title="Show Matter devices"
+                  onClick={() => selectTab("matter-devices")}
+                >
+                  <StatusPill status={matter?.status} now={now} />
+                </button>
                 <label className="header-keepalive-toggle" title="Toggle periodic Matter ping_node keepalive probes for remotes">
                   <input
                     type="checkbox"
-                    checked={matter?.status?.remoteKeepaliveEnabled !== false}
+                    checked={matter?.status?.remoteKeepaliveEnabled === true}
                     disabled={busy === "matter-remote-keepalive" || matter?.status?.enabled === false}
                     onChange={(event) => void setMatterRemoteKeepalive(event.target.checked)}
                   />
@@ -565,6 +623,8 @@ function App() {
               onSelectDevice={selectDeviceDetail}
               deviceOpResults={deviceOpResults}
             />
+          ) : tab === "matter-devices" ? (
+            <MatterDevicesPage snapshot={snapshot} matter={matter} now={now} />
           ) : tab === "log" ? (
             <LogView
               snapshot={logSnapshot}
@@ -578,7 +638,7 @@ function App() {
           ) : tab === "epaper" ? (
             <EpaperPreview snapshot={snapshot} now={now} pageVisible={pageVisible} />
           ) : (
-            <GraphView snapshot={visibleSnapshot} pageVisible={pageVisible} />
+            <GraphView snapshot={visibleSnapshot} pageVisible={pageVisible} darkMode={darkMode} />
           )}
         </div>
       </div>
@@ -586,7 +646,7 @@ function App() {
   );
 }
 
-function GraphView({ snapshot, pageVisible }: { snapshot: Snapshot | null; pageVisible: boolean }) {
+function GraphView({ snapshot, pageVisible, darkMode }: { snapshot: Snapshot | null; pageVisible: boolean; darkMode: boolean }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -807,12 +867,13 @@ function GraphView({ snapshot, pageVisible }: { snapshot: Snapshot | null; pageV
             <svg className="pointer-events-none absolute inset-0" width={canvas.width} height={canvas.height}>
               {canvas.edges.map((edge) => {
                 const d = referenceTangledPath(edge.points);
+                const stroke = darkMode ? darkFlowEdgeColor(edge.color) : edge.color;
                 return (
                   <g key={edge.id} className="flow-edge">
                     <path
                       d={d}
                       fill="none"
-                      stroke="#ededeb"
+                      stroke="var(--flow-edge-backdrop)"
                       strokeWidth="6"
                       opacity="0.96"
                       strokeLinecap="round"
@@ -821,7 +882,7 @@ function GraphView({ snapshot, pageVisible }: { snapshot: Snapshot | null; pageV
                     <path
                       d={d}
                       fill="none"
-                      stroke={edge.color}
+                      stroke={stroke}
                       strokeWidth="2.35"
                       opacity="0.98"
                       strokeLinecap="round"
@@ -899,6 +960,17 @@ function referenceTangledPath(points: Array<{ x: number; y: number }>) {
   ].join(" ");
 }
 
+function darkFlowEdgeColor(color: string) {
+  const match = color.match(/^#([0-9a-f]{6})$/i);
+  if (!match) return color;
+  const value = match[1];
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  const lift = (channel: number) => Math.round(channel + (255 - channel) * 0.22).toString(16).padStart(2, "0");
+  return `#${lift(red)}${lift(green)}${lift(blue)}`;
+}
+
 function roomOf(id: string) {
   return id.split(".")[0] ?? id;
 }
@@ -911,6 +983,76 @@ function roomNames(snapshot: Snapshot | null) {
   for (const rule of snapshot.rules) rooms.add(roomOf(rule.name));
   for (const action of snapshot.eventActions ?? []) rooms.add(roomOf(action.name));
   return [...rooms].sort((left, right) => left.localeCompare(right));
+}
+
+function MatterDevicesPage({ snapshot, matter, now }: { snapshot: Snapshot | null; matter: Snapshot["providers"][number] | undefined; now: number }) {
+  const nodes = matterDeviceNodes(matter?.status);
+  const targetByKey = new Map((snapshot?.targets ?? []).map((target) => [target.key, target]));
+  const resolvedTargetByNode = new Map<number, Snapshot["targets"][number]>();
+  for (const binding of matter?.status?.resolved ?? []) {
+    const target = targetByKey.get(binding.key);
+    if (target) {
+      resolvedTargetByNode.set(binding.nodeId, target);
+    }
+  }
+  const counts = matterAvailabilityCounts(matter?.status);
+  return (
+    <section className="gaia-panel matter-devices-panel">
+      <div className="gaia-panel-head border-l-4 border-l-gaia-cyan">
+        <div className="min-w-0">
+          <h2 className="gaia-title">Matter Devices</h2>
+          <div className="truncate text-xs font-bold text-gaia-muted">All nodes reported by the Matter provider</div>
+        </div>
+        <span className="gaia-chip">{counts ? `${counts.available}/${counts.total} connected` : `${nodes.length} devices`}</span>
+      </div>
+      {nodes.length ? (
+        <div className="matter-device-table">
+          <div className="matter-device-header">
+            <span>Status</span>
+            <span>Node</span>
+            <span>Name</span>
+            <span>Type</span>
+            <span>Last heard</span>
+            <span>Identifiers</span>
+            <span>RSSI</span>
+          </div>
+          {nodes.map((node) => {
+            const status = matterNodeStatus(node, now);
+            const target = resolvedTargetByNode.get(node.nodeId);
+            const type = matterNodeType(node, target);
+            const name = matterNodeName(node, target);
+            return (
+              <article key={node.nodeId} className="matter-device-row">
+                <span>
+                  <span className={`matter-device-status matter-device-status-${status.tone}`} title={status.title}>
+                    {status.label}
+                  </span>
+                </span>
+                <span className="font-black">{node.nodeId}</span>
+                <span className="min-w-0 truncate font-bold" title={name}>
+                  {name}
+                </span>
+                <span className="min-w-0 truncate text-xs font-bold text-gaia-muted" title={type}>
+                  {type || "-"}
+                </span>
+                <span className="min-w-0 truncate text-xs font-bold text-gaia-muted" title={node.lastHeardAt ? new Date(node.lastHeardAt).toLocaleString() : undefined}>
+                  {node.lastHeardAt ? formatRunTime(node.lastHeardAt) : "-"}
+                </span>
+                <span className="min-w-0 truncate text-xs text-gaia-muted" title={matterNodeIdentifiers(node)}>
+                  {matterNodeIdentifiers(node) || "-"}
+                </span>
+                <span className={deviceRssiClass(matterNodeRssiTone(node.rssi))}>
+                  {typeof node.rssi === "number" ? `${Math.round(node.rssi)}dBm` : "-"}
+                </span>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="gaia-row text-sm font-bold text-gaia-muted">No Matter devices reported yet.</div>
+      )}
+    </section>
+  );
 }
 
 function DevicesOverview({
@@ -1562,6 +1704,83 @@ function stripPrefix(value: string, prefix: string) {
 }
 
 type MatterResolvedBinding = NonNullable<NonNullable<Snapshot["providers"][number]["status"]>["resolved"]>[number];
+type MatterNode = NonNullable<NonNullable<Snapshot["providers"][number]["status"]>["nodes"]>[number];
+
+function matterDeviceNodes(status: Snapshot["providers"][number]["status"] | undefined): MatterNode[] {
+  if (!status) return [];
+  const byNode = new Map<number, MatterNode>();
+  for (const node of status.nodes ?? []) {
+    byNode.set(node.nodeId, node);
+  }
+  for (const binding of status.resolved ?? []) {
+    if (byNode.has(binding.nodeId)) continue;
+    byNode.set(binding.nodeId, {
+      nodeId: binding.nodeId,
+      label: binding.label,
+      mac: binding.mac,
+      available: binding.available,
+      offlineSince: binding.offlineSince,
+      rssi: binding.rssi,
+    });
+  }
+  return [...byNode.values()].sort((left, right) => left.nodeId - right.nodeId);
+}
+
+function matterNodeStatus(node: MatterNode, now: number) {
+  const lastActivityAt = node.lastEventAt ?? node.lastHeardAt;
+  const recentActivity = lastActivityAt !== undefined && now - lastActivityAt <= 15 * 60 * 1000;
+  if (node.available === true) {
+    return { label: "Connected", tone: "connected", title: "Matter node is connected" };
+  }
+  if (recentActivity) {
+    const health = node.available === false ? "Matter health reports this node is not reachable" : "Matter reachability has not been reported";
+    return {
+      label: "Recently active",
+      tone: "active",
+      title: `${health}; last ${node.lastEventAt ? "event" : "heard"} ${formatDuration(now - lastActivityAt)} ago`,
+    };
+  }
+  if (node.available === false) {
+    const duration = node.offlineSince ? ` for ${formatDuration(now - node.offlineSince)}` : "";
+    return { label: "Not reachable", tone: "offline", title: `Matter health reports this node is not reachable${duration}` };
+  }
+  return { label: "Unknown", tone: "unknown", title: "Matter node availability has not been reported" };
+}
+
+function matterNodeName(node: MatterNode, target?: Snapshot["targets"][number]) {
+  const displayName = target?.capabilities?.displayName;
+  return (
+    (typeof displayName === "string" && displayName.trim() ? displayName.trim() : undefined) ||
+    node.label?.trim() ||
+    target?.key ||
+    node.uniqueId ||
+    node.mac ||
+    `Node ${node.nodeId}`
+  );
+}
+
+function matterNodeType(node: MatterNode, target?: Snapshot["targets"][number]) {
+  const vendor = stringCapability(target?.capabilities?.vendor) ?? node.vendor;
+  const product = stringCapability(target?.capabilities?.product) ?? node.product ?? node.deviceType;
+  return [vendor, product].filter(Boolean).join(" ");
+}
+
+function matterNodeIdentifiers(node: MatterNode) {
+  return [
+    node.uniqueId ? `unique ${node.uniqueId}` : "",
+    node.mac ? `mac ${node.mac}` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function stringCapability(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function matterNodeRssiTone(value: number | undefined) {
+  if (typeof value !== "number") return "unknown";
+  const rounded = Math.round(value);
+  return rounded < -85 ? "bad" : rounded <= -70 ? "warn" : "ok";
+}
 
 function deviceProviderHealth(
   target: Snapshot["targets"][number],
@@ -1966,10 +2185,13 @@ function matterProviderHealth(status: Snapshot["providers"][number]["status"] | 
 
 function matterAvailabilityCounts(status?: Snapshot["providers"][number]["status"]) {
   if (!status || status.enabled === false) return null;
-  const total = status.nodeCount ?? status.resolved?.length ?? 0;
+  const nodes = matterDeviceNodes(status);
+  const total = nodes.length || status.nodeCount || status.resolved?.length || 0;
   if (!total) return null;
-  const availableNodeIds = new Set((status.resolved ?? []).filter((binding) => binding.available === true).map((binding) => binding.nodeId));
-  return { available: availableNodeIds.size, total };
+  const available = nodes.length
+    ? nodes.filter((node) => node.available === true).length
+    : new Set((status.resolved ?? []).filter((binding) => binding.available === true).map((binding) => binding.nodeId)).size;
+  return { available, total };
 }
 
 function formatDuration(ms: number) {

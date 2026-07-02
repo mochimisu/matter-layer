@@ -250,6 +250,35 @@ describe("MatterProvider command translation", () => {
     expect(events).toEqual(["room.remote.button.1.initialPress"]);
   });
 
+  it("tracks node event activity separately from Matter availability", () => {
+    const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
+    const internals = provider as any;
+    internals.targets.set("room.remote", {
+      target: "room.remote",
+      capabilities: {
+        buttons: {
+          1: { endpoint: 1, cluster: 59 },
+        },
+      },
+    });
+    internals.nodeByKey.set("room.remote", 123);
+    internals.availableByNode.set(123, false);
+    internals.runtime = {
+      dispatchEvent() {},
+      notifyProviderChanged() {},
+    };
+
+    internals.ingestDeviceEvent({ node_id: 123, endpoint_id: 1, cluster_id: 59, event_id: 1 });
+
+    const node = internals.snapshot().nodes.find((item: any) => item.nodeId === 123);
+    expect(node).toMatchObject({
+      nodeId: 123,
+      available: false,
+      lastHeardAt: expect.any(Number),
+      lastEventAt: expect.any(Number),
+    });
+  });
+
   it("resolves endpoint targets through their parent device", () => {
     const provider = new MatterProvider({ url: "ws://example.invalid", dryRun: false });
     const internals = provider as any;
@@ -864,6 +893,19 @@ describe("MatterProvider command translation", () => {
     expect(internals.remoteKeepaliveTimer).toBeUndefined();
   });
 
+  it("does not start the stale probe loop when remote keepalive is disabled", () => {
+    const provider = new MatterProvider({
+      url: "ws://example.invalid",
+      dryRun: false,
+      remoteKeepaliveEnabled: false,
+    });
+    const internals = provider as any;
+
+    internals.startStaleProbeLoop();
+
+    expect(internals.staleProbeTimer).toBeUndefined();
+  });
+
   it("toggles remote keepalive at runtime", () => {
     const provider = new MatterProvider({
       url: "ws://example.invalid",
@@ -880,10 +922,12 @@ describe("MatterProvider command translation", () => {
 
     provider.setRemoteKeepaliveEnabled(true);
     expect(provider.snapshot()).toMatchObject({ remoteKeepaliveEnabled: true });
+    expect(internals.staleProbeTimer).toBeDefined();
     expect(internals.remoteKeepaliveTimer).toBeDefined();
 
     provider.setRemoteKeepaliveEnabled(false);
     expect(provider.snapshot()).toMatchObject({ remoteKeepaliveEnabled: false });
+    expect(internals.staleProbeTimer).toBeUndefined();
     expect(internals.remoteKeepaliveTimer).toBeUndefined();
     expect(changed).toBe(2);
   });

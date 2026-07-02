@@ -83,6 +83,7 @@ export type Snapshot = {
       nodeCount?: number;
       lastMessageAt?: number;
       remoteKeepaliveEnabled?: boolean;
+      nodes?: Array<{ nodeId: number; label?: string; uniqueId?: string; mac?: string; vendor?: string; product?: string; deviceType?: string; available?: boolean; offlineSince?: number; rssi?: number; lastHeardAt?: number; lastEventAt?: number }>;
       resolved?: Array<{ key: string; nodeId: number; label?: string; mac?: string; available?: boolean; offlineSince?: number; rssi?: number; lastProbeAt?: number }>;
       unresolvedSources?: string[];
       unresolvedTargets?: string[];

@@ -14,16 +14,18 @@ import { loadRulesModule } from "./runtime/load";
 import type { RuntimeEvent } from "./runtime/types";
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const matterRemoteKeepaliveSetting = "matter.remoteKeepalive.enabled";
 
 async function main() {
   const config = loadConfig();
   const runtime = new MatterLayerRuntime({ dryRun: config.dryRun, overrideDbPath: config.dbPath });
   runtime.loadModules(await loadRulesModule(config.rulesModule));
+  const remoteKeepaliveEnabled = runtime.getBooleanSetting(matterRemoteKeepaliveSetting, config.matterRemoteKeepaliveEnabled);
   const matterProvider = new MatterProvider({
     url: config.matterWsUrl,
     dryRun: config.dryRun,
     enabled: config.matterEnabled,
-    remoteKeepaliveEnabled: config.matterRemoteKeepaliveEnabled,
+    remoteKeepaliveEnabled,
     bindings: config.matterBindings,
   });
   runtime.registerProvider(matterProvider);
@@ -178,6 +180,7 @@ async function main() {
       res.status(400).json({ error: "enabled must be boolean" });
       return;
     }
+    runtime.setBooleanSetting(matterRemoteKeepaliveSetting, enabled);
     matterProvider.setRemoteKeepaliveEnabled(enabled);
     res.json(runtime.snapshot());
   });

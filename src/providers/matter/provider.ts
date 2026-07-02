@@ -30,12 +30,18 @@ export class MatterProvider implements ProviderAdapter {
   private lastMessageAt?: number;
   private nodeByKey = new Map<string, number>();
   private resolvedTargets = new Set<string>();
+  private allNodeIds = new Set<number>();
   private labelByNode = new Map<number, string>();
   private uniqueIdByNode = new Map<number, string>();
   private macByNode = new Map<number, string>();
+  private vendorByNode = new Map<number, string>();
+  private productByNode = new Map<number, string>();
+  private deviceTypeByNode = new Map<number, string>();
   private availableByNode = new Map<number, boolean>();
   private offlineSinceByNode = new Map<number, number>();
   private rssiByNode = new Map<number, number>();
+  private lastHeardByNode = new Map<number, number>();
+  private lastEventByNode = new Map<number, number>();
   private lastProbeByTarget = new Map<string, number>();
   private lastProbeByNode = new Map<number, number>();
   private lastPingByNode = new Map<number, number>();
@@ -295,6 +301,7 @@ export class MatterProvider implements ProviderAdapter {
       nodeCount: this.nodeCount,
       lastMessageAt: this.lastMessageAt,
       remoteKeepaliveEnabled: this.remoteKeepaliveEnabled(),
+      nodes: this.matterNodesSnapshot(),
       resolved: [...this.nodeByKey.entries()].map(([key, nodeId]) => ({
         key,
         nodeId,
@@ -313,20 +320,56 @@ export class MatterProvider implements ProviderAdapter {
     };
   }
 
+  private matterNodesSnapshot() {
+    const nodeIds = new Set([
+      ...this.allNodeIds,
+      ...this.labelByNode.keys(),
+      ...this.uniqueIdByNode.keys(),
+      ...this.macByNode.keys(),
+      ...this.vendorByNode.keys(),
+      ...this.productByNode.keys(),
+      ...this.deviceTypeByNode.keys(),
+      ...this.availableByNode.keys(),
+      ...this.offlineSinceByNode.keys(),
+      ...this.rssiByNode.keys(),
+      ...this.lastHeardByNode.keys(),
+      ...this.lastEventByNode.keys(),
+    ]);
+    return [...nodeIds].sort((left, right) => left - right).map((nodeId) => ({
+      nodeId,
+      label: this.labelByNode.get(nodeId),
+      uniqueId: this.uniqueIdByNode.get(nodeId),
+      mac: this.macByNode.get(nodeId),
+      vendor: this.vendorByNode.get(nodeId),
+      product: this.productByNode.get(nodeId),
+      deviceType: this.deviceTypeByNode.get(nodeId),
+      available: this.availableByNode.get(nodeId),
+      offlineSince: this.offlineSinceByNode.get(nodeId),
+      rssi: this.rssiByNode.get(nodeId),
+      lastHeardAt: this.lastHeardByNode.get(nodeId),
+      lastEventAt: this.lastEventByNode.get(nodeId),
+    }));
+  }
+
   setRemoteKeepaliveEnabled(enabled: boolean) {
     this.options.remoteKeepaliveEnabled = enabled;
+    if (!enabled && this.staleProbeTimer) {
+      clearInterval(this.staleProbeTimer);
+      this.staleProbeTimer = undefined;
+    }
     if (!enabled && this.remoteKeepaliveTimer) {
       clearInterval(this.remoteKeepaliveTimer);
       this.remoteKeepaliveTimer = undefined;
     }
     if (enabled) {
+      this.startStaleProbeLoop();
       this.startRemoteKeepaliveLoop();
     }
     this.runtime?.notifyProviderChanged?.(this.name);
   }
 
   private remoteKeepaliveEnabled() {
-    return this.options.remoteKeepaliveEnabled !== false;
+    return this.options.remoteKeepaliveEnabled === true;
   }
 
   private connect() {
@@ -498,8 +541,14 @@ export class MatterProvider implements ProviderAdapter {
       const label = attrs["0/40/5"] ?? node.name ?? node.label;
       const uniqueId = attrs["0/40/18"];
       const mac = macFromAttrs(attrs);
+      const vendor = stringValue(attrs["0/40/1"] ?? node.vendorName ?? node.vendor_name ?? node.vendor);
+      const product = stringValue(attrs["0/40/3"] ?? node.productName ?? node.product_name ?? node.product);
+      const deviceType = deviceTypeFromNode(node, attrs);
       const hasAvailable = "available" in node;
       const available = Boolean(node.available);
+      if (Number.isFinite(nodeId)) {
+        this.allNodeIds.add(nodeId);
+      }
       if (Number.isFinite(nodeId) && typeof label === "string") {
         this.labelByNode.set(nodeId, label);
       }
@@ -508,6 +557,15 @@ export class MatterProvider implements ProviderAdapter {
       }
       if (Number.isFinite(nodeId) && mac) {
         this.macByNode.set(nodeId, mac);
+      }
+      if (Number.isFinite(nodeId) && vendor) {
+        this.vendorByNode.set(nodeId, vendor);
+      }
+      if (Number.isFinite(nodeId) && product) {
+        this.productByNode.set(nodeId, product);
+      }
+      if (Number.isFinite(nodeId) && deviceType) {
+        this.deviceTypeByNode.set(nodeId, deviceType);
       }
       if (Number.isFinite(nodeId)) {
         const rssi = threadRssiFromAttrs(attrs);
@@ -563,6 +621,7 @@ export class MatterProvider implements ProviderAdapter {
   private ingestEvent(event: any) {
     if (Array.isArray(event) && event.length >= 3) {
       const [nodeId, path, raw] = event;
+      this.markNodeHeard(Number(nodeId));
       const bindings = this.sourceByNodePath.get(`${nodeId}:${path}`);
       if (!bindings) {
         return;
@@ -578,6 +637,7 @@ export class MatterProvider implements ProviderAdapter {
     const attribute = event.attribute_id ?? event.attributeId ?? event.attribute;
     const path = event.path ?? [endpoint, cluster, attribute].filter((part) => part !== undefined).join("/");
     const raw = event.value ?? event.data?.value;
+    this.markNodeHeard(nodeId);
     const bindings = this.sourceByNodePath.get(`${nodeId}:${path}`);
     if (!bindings) {
       return;
@@ -593,6 +653,7 @@ export class MatterProvider implements ProviderAdapter {
     const eventName = event.event_name ?? event.eventName ?? event.event ?? event.name;
     const eventId = Number(event.event_id ?? event.eventId);
     const clusterId = Number(event.cluster_id ?? event.clusterId ?? event.cluster);
+    this.markNodeHeard(nodeId, { event: true });
     const matches = [...this.nodeByKey].filter(([, mappedNodeId]) => mappedNodeId === nodeId);
     const subject = matches[0]?.[0] ?? `node:${nodeId}`;
     let dispatchedEvent: string | undefined;
@@ -702,7 +763,9 @@ export class MatterProvider implements ProviderAdapter {
   }
 
   private startStaleProbeLoop() {
-    const enabled = process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "0" && process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "false";
+    const enabled = this.remoteKeepaliveEnabled()
+      && process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "0"
+      && process.env.MATTER_STALE_PROBE_ENABLE?.toLowerCase() !== "false";
     if (!enabled || this.staleProbeTimer) {
       return;
     }
@@ -714,9 +777,7 @@ export class MatterProvider implements ProviderAdapter {
   }
 
   private startRemoteKeepaliveLoop() {
-    const enabled = this.remoteKeepaliveEnabled()
-      && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "0"
-      && process.env.MATTER_REMOTE_KEEPALIVE_ENABLE?.toLowerCase() !== "false";
+    const enabled = this.remoteKeepaliveEnabled();
     if (!enabled || this.remoteKeepaliveTimer) {
       return;
     }
@@ -1021,6 +1082,19 @@ export class MatterProvider implements ProviderAdapter {
     this.runtime?.notifyProviderChanged?.(this.name);
   }
 
+  private markNodeHeard(nodeId: number, options: { event?: boolean } = {}) {
+    if (!Number.isFinite(nodeId)) {
+      return;
+    }
+    const now = Date.now();
+    this.allNodeIds.add(nodeId);
+    this.lastHeardByNode.set(nodeId, now);
+    if (options.event) {
+      this.lastEventByNode.set(nodeId, now);
+    }
+    this.runtime?.notifyProviderChanged?.(this.name);
+  }
+
   private send(message: any, timeoutMs = 5000) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("Matter websocket is not connected");
@@ -1116,6 +1190,41 @@ function macFromAttrs(attrs: Record<string, any>) {
     }
   }
   return null;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function scalarValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return stringValue(value);
+}
+
+function deviceTypeFromNode(node: Record<string, any>, attrs: Record<string, any>) {
+  const direct = scalarValue(node.deviceType ?? node.device_type ?? node.type);
+  if (direct) {
+    return direct;
+  }
+  const list = node.deviceTypes ?? node.device_types ?? attrs["0/29/0"] ?? attrs["1/29/0"];
+  if (!Array.isArray(list)) {
+    return undefined;
+  }
+  return list
+    .map((entry) => {
+      if (typeof entry === "number" || typeof entry === "string") {
+        return String(entry);
+      }
+      if (entry && typeof entry === "object") {
+        const data = entry as Record<string, unknown>;
+        return stringValue(data.name) ?? scalarValue(data.deviceType) ?? scalarValue(data.device_type) ?? scalarValue(data["0"]);
+      }
+      return undefined;
+    })
+    .filter((value): value is string => Boolean(value))
+    .join(", ") || undefined;
 }
 
 function threadRssiFromAttrs(attrs: Record<string, any>) {

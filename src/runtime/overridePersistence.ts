@@ -27,6 +27,13 @@ export class OverridePersistence {
         primary key (target, key)
       )
     `);
+    this.db.exec(`
+      create table if not exists app_settings (
+        key text primary key,
+        value text not null,
+        updated_at integer not null
+      )
+    `);
   }
 
   load(now = Date.now()): PersistedOverrideItem[] {
@@ -82,6 +89,21 @@ export class OverridePersistence {
       this.db.exec("rollback");
       throw error;
     }
+  }
+
+  getSetting(key: string): unknown | undefined {
+    const row = this.db.prepare("select value from app_settings where key = ?").get(key) as { value: string } | undefined;
+    return row ? JSON.parse(row.value) : undefined;
+  }
+
+  setSetting(key: string, value: unknown) {
+    this.db.prepare(`
+      insert into app_settings (key, value, updated_at)
+      values (?, ?, ?)
+      on conflict(key) do update set
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(key, JSON.stringify(value), Date.now());
   }
 
   close() {

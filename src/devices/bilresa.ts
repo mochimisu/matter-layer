@@ -130,6 +130,17 @@ function createBlindIntents(covers: CoverGroup) {
         close();
       }
     });
+    cover.onActiveLayerChange((active) => {
+      if (active?.layer !== "override" || active.writer !== "web") {
+        return;
+      }
+      const motion = motionFromState(active.state);
+      if (!motion) {
+        return;
+      }
+      covers.state.motion.set(motion);
+      markSelfCommand();
+    });
   }
 
   return {
@@ -162,6 +173,23 @@ function createBlindIntents(covers: CoverGroup) {
       close();
     },
   };
+}
+
+function motionFromState(state: unknown): BlindMotion | undefined {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return undefined;
+  }
+  const record = state as Record<string, unknown>;
+  if (record.motion === "stop") {
+    return "idle";
+  }
+  if (record.position === "open") {
+    return "up";
+  }
+  if (record.position === "closed") {
+    return "down";
+  }
+  return undefined;
 }
 
 function manualOverrideMatches(output: unknown, value: Record<string, unknown>) {

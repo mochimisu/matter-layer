@@ -174,11 +174,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       return;
     }
     const forceApply = this.forceApplyTargets.delete(target);
-    if (!forceApply && this.commandMatchesObserved(command)) {
+    const observedStatus = this.commandObservedStatus(command);
+    if (!forceApply && observedStatus === "matches") {
       this.layers.shouldApply(command);
       return;
     }
-    if (!forceApply && !this.layers.shouldApply(command)) {
+    if (!forceApply && !this.layers.shouldApply(command) && observedStatus !== "mismatch") {
       return;
     }
     if (forceApply) {
@@ -292,6 +293,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.dispatchSourceChange(update);
     this.evaluateAffectedSignals(update.source);
     this.runAffected(update.source);
+    this.reconcileTargetsForSource(update);
   }
 
   async start() {
@@ -414,6 +416,15 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       expiresAt,
     });
     this.enqueueApply(target);
+  }
+
+  getBooleanSetting(key: string, defaultValue: boolean) {
+    const value = this.overridePersistence?.getSetting(key);
+    return typeof value === "boolean" ? value : defaultValue;
+  }
+
+  setBooleanSetting(key: string, value: boolean) {
+    this.overridePersistence?.setSetting(key, value);
   }
 
   dispatchEvent(event: string) {
@@ -665,6 +676,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
               ? (surfaced.output.state as Record<string, unknown>).power
               : undefined,
             reason: surfaced.output.reason,
+            writer: surfaced.output.writer,
           }
         : null,
       provider: "synthetic",
@@ -777,21 +789,27 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.overridePersistence?.replaceTarget(target, this.layers.items(target, "override"));
   }
 
-  private commandMatchesObserved(command: DesiredCommand) {
+  private commandObservedStatus(command: DesiredCommand) {
     if (!command.state) {
-      return false;
+      return "unknown";
     }
     const target = this.targets.get(command.target);
     if (!target) {
-      return false;
+      return "unknown";
     }
+    let hasObserved = false;
     for (const [property, desired] of Object.entries(command.state)) {
       const source = this.sourceForTargetProperty(command.target, property);
-      if (!source || !observedMatchesDesired(property, desired, source.peek())) {
-        return false;
+      const observed = source?.peek();
+      if (!source || observed === undefined) {
+        continue;
+      }
+      hasObserved = true;
+      if (!observedMatchesDesired(property, desired, observed)) {
+        return "mismatch";
       }
     }
-    return Object.keys(command.state).length > 0;
+    return hasObserved && Object.keys(command.state).length > 0 ? "matches" : "unknown";
   }
 
   private sourceForTargetProperty(target: string, property: string) {
@@ -802,6 +820,28 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     const displaySource = this.targets.get(target)?.display?.status?.source;
     const source = displaySource ? this.sources.get(displaySource) : undefined;
     return source?.binding.property === property ? source : undefined;
+  }
+
+  private reconcileTargetsForSource(update: SourceUpdate) {
+    if (update.provider !== "matter" && update.provider !== "ha" && update.provider !== "fake") {
+      return;
+    }
+    const changedSource = this.sources.get(update.source);
+    if (!changedSource) {
+      return;
+    }
+    for (const target of this.targets.keys()) {
+      const command = this.layers.desiredCommand(target);
+      if (!command?.state) {
+        continue;
+      }
+      for (const property of Object.keys(command.state)) {
+        if (this.sourceForTargetProperty(target, property)?.source === changedSource.source) {
+          this.enqueueApply(target);
+          break;
+        }
+      }
+    }
   }
 }
 

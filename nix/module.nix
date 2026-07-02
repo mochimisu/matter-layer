@@ -56,7 +56,7 @@ in {
 
     matterRemoteKeepaliveEnabled = lib.mkOption {
       type = lib.types.bool;
-      default = true;
+      default = false;
       description = "Send periodic Matter ping_node keepalive probes to targets marked for remote keepalive.";
     };
 

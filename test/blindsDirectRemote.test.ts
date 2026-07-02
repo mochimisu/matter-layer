@@ -204,6 +204,58 @@ describe("direct blind remote inference", () => {
 
     runtime.stop();
   });
+
+  it("does not reinterpret web override movement as manual blind input", async () => {
+    const runtime = buildRuntime();
+    await runtime.start();
+
+    runtime.dispatchEvent("office.blindsRemote.button.1.initialPress");
+    await tick();
+    expect(runtime.layers.surface("office.blinds")).toMatchObject({
+      layer: "override",
+      output: {
+        state: { position: "open" },
+        reason: "Manual blind input",
+        writer: "manual",
+      },
+    });
+
+    runtime.setWebOverride("office.blinds", { position: "closed" }, { reason: "Web override" });
+    await tick();
+    expect(runtime.layers.surface("office.blinds")).toMatchObject({
+      layer: "override",
+      output: {
+        state: { position: "closed" },
+        reason: "Web override",
+        writer: "web",
+      },
+    });
+
+    runtime.updateSource({
+      source: "office.blinds.position",
+      value: 40,
+      provider: "matter",
+      observedAt: Date.now(),
+    });
+    runtime.updateSource({
+      source: "office.blinds.position",
+      value: 55,
+      provider: "matter",
+      observedAt: Date.now(),
+    });
+    await tick();
+
+    expect(runtime.layers.surface("office.blinds")).toMatchObject({
+      layer: "override",
+      output: {
+        state: { position: "closed" },
+        reason: "Web override",
+        writer: "web",
+      },
+    });
+
+    runtime.stop();
+  });
 });
 
 function buildRuntime(overrideDbPath?: string) {

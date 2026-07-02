@@ -37,11 +37,15 @@ if [ -z "${MATTER_LAYER_HA_TOKEN:-}" ] && [ -z "${MATTER_HA_TOKEN:-}" ] && [ -r 
   set +a
 fi
 export MATTER_LAYER_MATTER_ENABLED="${MATTER_LAYER_MATTER_ENABLED:-1}"
-export MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED="${MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED:-1}"
+export MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED="${MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED:-0}"
 export MATTER_LAYER_DRY_RUN="${MATTER_LAYER_DRY_RUN:-0}"
 export MATTER_LAYER_PORT="${MATTER_LAYER_PORT:-3010}"
 export MATTER_LAYER_WEB_DEV="${MATTER_LAYER_WEB_DEV:-1}"
 state_home="${XDG_STATE_HOME:-${HOME:-$PWD/.state}/.local/state}"
 export MATTER_LAYER_DB_PATH="${MATTER_LAYER_DB_PATH:-$state_home/matter-layer/dev-live.sqlite}"
 
-./node_modules/.bin/tsx watch src/server.ts
+./node_modules/.bin/tsx watch \
+  --include "$rules_module" \
+  --include "$(dirname "$rules_module")/**/*.ts" \
+  --include "$bindings_file" \
+  src/server.ts
