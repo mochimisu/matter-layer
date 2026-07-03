@@ -304,6 +304,7 @@ function renderRoomEpaperSvg(snapshot: Snapshot, options: EpaperRenderOptions & 
   <rect width="${profile.width}" height="${profile.height}" fill="${profile.background}"/>
   <rect width="${profile.width}" height="${profile.height}" fill="url(#epaper-grid)"/>
   <rect x="0" y="0" width="${profile.width}" height="${48 * scaleY}" fill="${profile.inverse}"/>
+  <text x="${snap(776 * scaleX)}" y="${snap(17 * scaleY)}" fill="${profile.inverseText}" font-family="${epaperFontFamily}" font-size="${snap(9 * Math.min(scaleX, scaleY))}" font-weight="900" text-anchor="end">UPDATED ${escapeXml(formatEpaperUpdatedAt(now))}</text>
   <text x="${snap(24 * scaleX)}" y="${snap(31 * scaleY)}" fill="${profile.inverseText}" font-family="${epaperFontFamily}" font-size="${snap(24 * Math.min(scaleX, scaleY))}" font-weight="900">${escapeXml(options.title.toUpperCase())}</text>
   <text x="${snap(24 * scaleX)}" y="${snap(76 * scaleY)}" fill="${profile.foreground}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">DEVICES</text>
   <text x="${snap(408 * scaleX)}" y="${snap(76 * scaleY)}" fill="${profile.foreground}" font-family="${epaperFontFamily}" font-size="${snap(14 * Math.min(scaleX, scaleY))}" font-weight="900">DRIVES</text>
@@ -1250,6 +1251,10 @@ function formatForDuration(ms: number) {
 
 function formatEpaperTime(value: number) {
   return new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(floorToMinute(value));
+}
+
+function formatEpaperUpdatedAt(value: number) {
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(floorToMinute(value));
 }
 
 function floorToMinute(value: number) {

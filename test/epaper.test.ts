@@ -2,6 +2,30 @@ import { describe, expect, it } from "vitest";
 import { renderRoomEpaperPanelSvg } from "../src/epaper";
 
 describe("e-paper renderer", () => {
+  it("draws the render update time in the top right header", () => {
+    const snapshot = {
+      sources: [],
+      signals: [],
+      targets: [],
+      rules: [],
+      layers: [],
+      commands: [],
+      matterLog: [],
+      events: [],
+      eventActions: [],
+      pulses: [],
+      providers: [
+        { name: "matter", status: { enabled: false, connected: false, resolved: [] } },
+      ],
+    };
+
+    const svg = renderRoomEpaperPanelSvg(snapshot as never, { room: "office", now: Date.UTC(2026, 0, 1, 15, 45) });
+
+    expect(svg).toContain('x="776"');
+    expect(svg).toContain('y="17"');
+    expect(svg).toContain('text-anchor="end">UPDATED ');
+  });
+
   it("shows concrete transitive source leaves instead of internal scheduler deps", () => {
     const snapshot = {
       sources: [
