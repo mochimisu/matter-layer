@@ -36,8 +36,7 @@ export function rule(name: string, run: (() => void) | (() => () => void)) {
   if (!activeRuleRegistrar) {
     throw new Error("rule(...) called outside defineRoomRules");
   }
-  const maybeRun = run();
-  activeRuleRegistrar(name, typeof maybeRun === "function" ? maybeRun : (run as () => void));
+  activeRuleRegistrar(name, run as () => void);
 }
 
 export function any(...values: unknown[]) {

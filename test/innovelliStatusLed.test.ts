@@ -85,6 +85,42 @@ describe("Inovelli status LED rule", () => {
     runtime.stop();
   });
 
+  it("clears stale anonymous automation when a named rule turns the dimmer off", async () => {
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [
+        defineRoomDevices("room", ({ room }) => {
+          room.light = innovelli("room.light", { on: { level: "40%" } });
+        }),
+      ],
+      rules: [
+        defineRoomRules("room", ({ room, rule }) => {
+          rule("light", () => room.light.auto(false));
+        }),
+      ],
+    });
+    runtime.writeLayer("room.light", "automation", { state: { power: "on", level: "40%" } });
+    await runtime.start();
+
+    const automationItems = runtime.layers
+      .snapshot()
+      .find((layer) => layer.target === "room.light")
+      ?.layers.find((layer) => layer.layer === "automation")
+      ?.items ?? [];
+
+    expect(automationItems).toEqual([
+      expect.objectContaining({
+        key: "room.light",
+        output: expect.objectContaining({ state: { power: "off" } }),
+      }),
+    ]);
+    expect(runtime.layers.surface("room.light")).toMatchObject({
+      layer: "automation",
+      output: { state: { power: "off" } },
+    });
+    runtime.stop();
+  });
+
   it("uses 10% brightness for an off override input", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     runtime.loadModules({
@@ -176,7 +212,7 @@ describe("Inovelli status LED rule", () => {
     runtime.dispatchEvent("room.light.paddle.up.singlePress");
     await tick();
     expect(runtime.layers.surface("room.light")).toMatchObject({
-      layer: "default",
+      layer: "automation",
       output: { state: { power: "off" } },
     });
 
@@ -212,8 +248,8 @@ describe("Inovelli status LED rule", () => {
       await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
 
       expect(runtime.layers.surface("room.light.endpoint.6.statusLed")).toMatchObject({
-        layer: "default",
-        output: { state: { power: "on", color: "green", level: "2%" } },
+        layer: "automation",
+        output: { state: { power: "on", color: "green", level: "10%" } },
       });
     } finally {
       runtime.stop();

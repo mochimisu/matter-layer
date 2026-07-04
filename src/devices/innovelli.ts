@@ -47,6 +47,8 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
     const write = () => {
       if (value === true) {
         device.set({ ...device.defaults }, { layer: "automation" });
+      } else if (value === false) {
+        device.set({ power: "off" }, { layer: "automation" });
       } else if (value) {
         device.set(value, { layer: "automation" });
       } else {

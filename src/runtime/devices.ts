@@ -486,7 +486,10 @@ function normalizeAutoValue(value: boolean | Record<string, unknown> | null | un
   if (value === true) {
     return { ...defaults };
   }
-  if (!value) {
+  if (value === false) {
+    return { power: "off" };
+  }
+  if (value === null || value === undefined) {
     return null;
   }
   return value;

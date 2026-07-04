@@ -6,7 +6,7 @@ import {
   setRuleRegistrar,
   type RoomModule,
 } from "./dsl";
-import { LayerStore } from "./layers";
+import { defaultLayerItem, LayerStore } from "./layers";
 import { SourceRef } from "./sources";
 import { track } from "./tracking";
 import { setActiveRuleName, setDeviceRuntime, type DeviceRuntime } from "./devices";
@@ -132,6 +132,9 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   writeLayer(target: string, layer: LayerName, output: LayerOutput | null, key?: string) {
     const before = this.layerFingerprint(target);
     this.layers.write(target, layer, output, key);
+    if (layer === "automation" && key && key !== defaultLayerItem) {
+      this.layers.clear(target, layer, defaultLayerItem);
+    }
     if (before !== this.layerFingerprint(target)) {
       this.persistOverrideLayer(target, layer);
       this.emit({ type: "layer.changed", target, layer, output, key });

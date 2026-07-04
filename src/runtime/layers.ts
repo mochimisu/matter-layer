@@ -10,7 +10,7 @@ export const layerPriority: Record<LayerName, number> = {
 };
 
 const layerOrder = (Object.keys(layerPriority) as LayerName[]).sort((left, right) => layerPriority[right] - layerPriority[left]);
-const defaultLayerItem = "__layer";
+export const defaultLayerItem = "__layer";
 const overrideInputItem = "input";
 
 export class LayerStore {
