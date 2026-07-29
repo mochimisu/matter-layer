@@ -1018,12 +1018,18 @@ export class MatterProvider implements ProviderAdapter {
       );
     }
     if ("color" in command.state && capabilities.color) {
-      const color = normalizeColor(command.state.color);
+      const color = capabilities.color.mode === "xy"
+        ? normalizeXyColor(command.state.color, capabilities.color.colors)
+        : normalizeColor(command.state.color);
       if (color) {
         messages.push(
           this.deviceCommand(
             nodeId,
-            { endpoint: capabilities.color.endpoint, cluster: capabilities.color.cluster, command: "MoveToHueAndSaturation" },
+            {
+              endpoint: capabilities.color.endpoint,
+              cluster: capabilities.color.cluster,
+              command: capabilities.color.mode === "xy" ? "MoveToColor" : "MoveToHueAndSaturation",
+            },
             color,
           ),
         );
@@ -1138,6 +1144,35 @@ function normalizeColor(value: unknown) {
     return colorPayload(212);
   }
   return null;
+}
+
+function normalizeXyColor(value: unknown, configuredColors?: Record<string, unknown>) {
+  const configured = typeof value === "string" ? configuredColors?.[value] : undefined;
+  if (
+    Array.isArray(configured)
+    && configured.length === 2
+    && configured.every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate))
+  ) {
+    return xyColorPayload(configured[0], configured[1]);
+  }
+  const colors: Record<string, [number, number]> = {
+    green: [11298, 48941],
+    blue: [8880, 2615],
+    purple: [21031, 10106],
+  };
+  const color = typeof value === "string" ? colors[value] : undefined;
+  if (!color) return null;
+  return xyColorPayload(color[0], color[1]);
+}
+
+function xyColorPayload(colorX: number, colorY: number) {
+  return {
+    colorX,
+    colorY,
+    transitionTime: 0,
+    optionsMask: 0,
+    optionsOverride: 0,
+  };
 }
 
 function pingResultIsReachable(result: unknown) {

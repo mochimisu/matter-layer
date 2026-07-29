@@ -92,6 +92,63 @@ describe("MatterProvider command translation", () => {
     ]);
   });
 
+  it("uses XY ColorControl commands for XY-only lights", () => {
+    const internals = providerWithTarget("mbr.blindsStatus", {
+      color: {
+        endpoint: 1,
+        cluster: 768,
+        mode: "xy",
+      },
+    });
+
+    const messages = internals.translateCommand({
+      target: "mbr.blindsStatus",
+      state: { color: "purple" },
+      providerPreference: "matter-first",
+    });
+
+    expect(messages).toEqual([
+      {
+        command: "device_command",
+        args: {
+          node_id: 123,
+          endpoint_id: 1,
+          cluster_id: 768,
+          command_name: "MoveToColor",
+          payload: {
+            colorX: 21031,
+            colorY: 10106,
+            transitionTime: 0,
+            optionsMask: 0,
+            optionsOverride: 0,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("supports per-device XY color calibration", () => {
+    const internals = providerWithTarget("mbr.blindsStatus", {
+      color: {
+        endpoint: 1,
+        cluster: 768,
+        mode: "xy",
+        colors: { purple: [14723, 21544] },
+      },
+    });
+
+    const [message] = internals.translateCommand({
+      target: "mbr.blindsStatus",
+      state: { color: "purple" },
+      providerPreference: "matter-first",
+    });
+
+    expect(message.args).toMatchObject({
+      command_name: "MoveToColor",
+      payload: { colorX: 14723, colorY: 21544 },
+    });
+  });
+
   it("maps closed cover position to the close command", () => {
     const internals = providerWithTarget("room.blinds", {
       commands: {

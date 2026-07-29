@@ -264,6 +264,8 @@ export function rule(name: string, run: () => void) {
 }
 
 export class CoverDevice extends TargetDevice {
+  private activeLayerSource?: SourceRef<ActiveLayerState>;
+
   open() {
     this.set({ position: "open" }, { layer: "automation" });
   }
@@ -281,8 +283,13 @@ export class CoverDevice extends TargetDevice {
   }
 
   onActiveLayerChange(handler: (active: ActiveLayerState, update: SourceUpdate) => void) {
-    activeLayer(this.key);
+    this.activeLayer();
     runtime().registerSourceHandler(`${this.key}.activeLayer`, (update) => handler(update.value as ActiveLayerState, update));
+  }
+
+  activeLayer() {
+    this.activeLayerSource ??= activeLayer(this.key);
+    return this.activeLayerSource;
   }
 }
 

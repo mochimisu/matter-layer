@@ -109,22 +109,11 @@ export class LayerStore {
     if (!layers) {
       return null;
     }
-    const now = Date.now();
     let combinedState: unknown;
     let highest: { layer: LayerName; output: LayerOutput; since?: number } | null = null;
     for (const layer of [...layerOrder].reverse()) {
       const bucket = layers.get(layer);
       if (!bucket) continue;
-      for (const [key, output] of bucket) {
-        if (output.expiresAt && output.expiresAt <= now) {
-          bucket.delete(key);
-          this.writtenAt.delete(layerKey(target, layer, key));
-        }
-      }
-      if (bucket.size === 0) {
-        layers.delete(layer);
-        continue;
-      }
       const surfaced = this.bucketSurface(target, layer);
       if (!surfaced) continue;
       combinedState = mergeState(combinedState, surfaced.output.state);

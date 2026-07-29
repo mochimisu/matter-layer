@@ -1,4 +1,4 @@
-import { eventAction, remote } from "matter-layer/devices";
+import { eventAction, remote, rule } from "matter-layer/devices";
 import { state } from "matter-layer/rules";
 import type { CoverGroup, Remote } from "matter-layer/rules";
 
@@ -7,7 +7,6 @@ type BlindMotion = "idle" | "up" | "down";
 const directRemoteMinDelta = 1;
 const remoteRepeatWindowMs = 2000;
 const selfCommandWindowMs = 8000;
-const manualOverrideTtl = "30m";
 const manualReason = "Manual blind input";
 
 export function bilresa(key: string): Remote {
@@ -34,6 +33,7 @@ export function bilresaBlinds(remote: Remote, covers: CoverGroup) {
   const outputs = covers.covers.map((cover) => cover.key);
   eventAction(`${remote.key}.open-blinds`, `${remote.key}.button.1.initialPress`, outputs);
   eventAction(`${remote.key}.close-blinds`, `${remote.key}.button.2.initialPress`, outputs);
+  rule(`${remote.key}.persist-manual-blind-input`, () => intents.persistManualOverrides());
 
   remote.onInitialPress(1, () => {
     intents.remoteOpen();
@@ -67,10 +67,10 @@ function createBlindIntents(covers: CoverGroup) {
     if (!covers.covers.every((cover) => manualOverrideMatches(cover.layer.override?.read(), value))) {
       return false;
     }
+    covers.state.motion.set("idle");
     for (const cover of covers.covers) {
       cover.layer.override?.clear();
     }
-    covers.state.motion.set("idle");
     return true;
   };
 
@@ -80,11 +80,12 @@ function createBlindIntents(covers: CoverGroup) {
     }
     for (const cover of covers.covers) {
       cover.forceApplyNext();
-      cover.layer.override = state.expiring(
-        value,
-        { layer: "override", reason: manualReason, writer: "manual" },
-        manualOverrideTtl,
-      );
+      cover.layer.override = {
+        state: value,
+        layer: "override",
+        reason: manualReason,
+        writer: "manual",
+      };
     }
   };
 
@@ -131,7 +132,9 @@ function createBlindIntents(covers: CoverGroup) {
       }
     });
     cover.onActiveLayerChange((active) => {
-      if (active?.layer !== "override" || active.writer !== "web") {
+      const isAutomationCommand = active?.layer === "automation";
+      const isWebCommand = active?.layer === "override" && active.writer === "web";
+      if (!isAutomationCommand && !isWebCommand) {
         return;
       }
       const motion = motionFromState(active.state);
@@ -144,6 +147,18 @@ function createBlindIntents(covers: CoverGroup) {
   }
 
   return {
+    persistManualOverrides() {
+      for (const cover of covers.covers) {
+        const current = cover.layer.override?.read();
+        if (current?.writer !== "manual" || current.expiresAt === undefined) {
+          continue;
+        }
+        cover.layer.override = {
+          ...current,
+          expiresAt: undefined,
+        };
+      }
+    },
     remoteOpen() {
       if (clearMatchingManual({ position: "open" })) {
         return;
