@@ -280,15 +280,15 @@ function App() {
   }
 
   async function setSource(source: string, value: unknown, ttl?: string) {
-    await mutate(source, "/api/test/source", {
+    await mutate(source, `/api/sources/${encodeURIComponent(source)}/override`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ source, value, ttl }),
+      body: JSON.stringify({ value, ttl, reason: ttl ? `Source override for ${ttl}` : "Source override" }),
     });
   }
 
   async function clearSource(source: string) {
-    await mutate(source, `/api/test/source/${encodeURIComponent(source)}/override`, { method: "DELETE" });
+    await mutate(source, `/api/sources/${encodeURIComponent(source)}/override`, { method: "DELETE" });
   }
 
   async function dispatchDeviceEvent(event: string) {
@@ -343,6 +343,14 @@ function App() {
     });
   }
 
+  async function setScene(room: string, scene: string) {
+    await mutate(`scene:${room}`, `/api/scenes/${encodeURIComponent(room)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scene }),
+    });
+  }
+
   async function toggleSource(source: string) {
     await mutate(source, `/api/test/source/${encodeURIComponent(source)}/toggle`, { method: "POST" });
   }
@@ -364,7 +372,8 @@ function App() {
   const visibleSnapshot = roomSnapshot;
   const logSnapshot = useMemo(() => filterSnapshotByLogFilters(roomSnapshot, logDeviceFilter, logAutomationFilter), [roomSnapshot, logDeviceFilter, logAutomationFilter]);
   const matter = snapshot?.providers.find((provider) => provider.name === "matter");
-  const activeOverrides = visibleSnapshot?.layers.filter((layer) => layer.surfaced?.layer === "webOverride" || layer.surfaced?.layer === "override").length ?? 0;
+  const activeOverrides = (visibleSnapshot?.layers.filter((layer) => layer.surfaced?.layer === "webOverride" || layer.surfaced?.layer === "override").length ?? 0)
+    + (visibleSnapshot?.sources.filter((source) => source.override).length ?? 0);
   const disabledRules = visibleSnapshot?.rules.filter((rule) => !rule.enabled).length ?? 0;
   const drivenDevices = visibleSnapshot?.layers.filter((layer) => layer.surfaced).length ?? 0;
   const visibleTargetKeys = new Set((visibleSnapshot?.targets ?? []).flatMap((target) => [target.key, target.target]));
@@ -615,6 +624,7 @@ function App() {
               selectedDevice={selectedDevice}
               onSetOverride={setOverride}
               onSetSource={setSource}
+              onSetScene={setScene}
               onClearOverride={clearOverride}
               onClearSource={clearSource}
               onDispatchEvent={dispatchDeviceEvent}
@@ -1062,6 +1072,7 @@ function DevicesOverview({
   busy,
   onSetOverride,
   onSetSource,
+  onSetScene,
   onClearOverride,
   onClearSource,
   onDispatchEvent,
@@ -1078,6 +1089,7 @@ function DevicesOverview({
   selectedDevice: string | null;
   onSetOverride: (target: string, state: Record<string, unknown>, ttl?: string) => Promise<void>;
   onSetSource: (source: string, value: unknown, ttl?: string) => Promise<void>;
+  onSetScene: (room: string, scene: string) => Promise<void>;
   onClearOverride: (target: string) => Promise<void>;
   onClearSource: (source: string) => Promise<void>;
   onDispatchEvent: (event: string) => Promise<void>;
@@ -1121,10 +1133,23 @@ function DevicesOverview({
           <Fragment key={room}>
             {(() => {
               const availability = roomAvailability(targets, resolvedByKey);
+              const scene = snapshot?.scenes?.find((item) => item.room === room);
               return (
             <div className="device-room-head">
               <h2 className="device-room-title">{humanRoomName(room)}</h2>
               <div className="device-room-rule" aria-hidden="true" />
+              {scene ? (
+                <label className="device-room-scene">
+                  <span>Scene</span>
+                  <select
+                    value={scene.selected}
+                    disabled={busy === `scene:${room}`}
+                    onChange={(event) => void onSetScene(room, event.target.value)}
+                  >
+                    {scene.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                </label>
+              ) : null}
               <span className="device-room-count">{availability.available}/{availability.total}</span>
             </div>
               );
@@ -1145,6 +1170,8 @@ function DevicesOverview({
               const displayLabel = deviceDisplayLabel(label, target, room);
               const deviceInfo = [label, target.key, [vendor, product].filter(Boolean).join(" ")].filter(Boolean);
               const reason = layer?.surfaced ? layerOutputLabel(layer.surfaced.output) : "";
+              const controlSource = controllableSource(target, sourceById);
+              const sourceOverride = controlSource?.override;
               const actions = deviceActions(target, sourceById, onSetOverride, onSetSource, onClearOverride, onClearSource, onDispatchEvent);
               const rowClass = deviceRowIndex++ % 2 === 0 ? "device-table-row device-table-row-striped" : "device-table-row";
               return (
@@ -1159,8 +1186,8 @@ function DevicesOverview({
                       <DeviceName label={displayLabel} details={deviceInfo} offline={health.tone === "bad"} offlineSince={health.offlineSince} />
                     </button>
                   </span>
-                  <span><LayerBadge layer={layer?.surfaced?.layer} /></span>
-                  <span className="min-w-0 truncate text-xs text-gaia-muted" title={reason || undefined}>{reason}</span>
+                  <span><LayerBadge layer={sourceOverride ? "override" : layer?.surfaced?.layer} /></span>
+                  <span className="min-w-0 truncate text-xs text-gaia-muted" title={(sourceOverride?.reason ?? reason) || undefined}>{sourceOverride?.reason ?? reason}</span>
                   <span className="min-w-0 truncate text-xs text-gaia-muted">
                     {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
                   </span>
@@ -1812,7 +1839,10 @@ function deviceStatus(
   layer?: Snapshot["layers"][number],
 ) {
   const display = target.display?.status;
-  const source = display?.source ? sourceById.get(display.source) : fallbackStatusSource(target, sourceById);
+  const overriddenSource = controllableSource(target, sourceById);
+  const source = overriddenSource?.override
+    ? overriddenSource
+    : display?.source ? sourceById.get(display.source) : fallbackStatusSource(target, sourceById);
   const raw = source?.value ?? display?.value;
   const layeredState = layer?.surfaced?.output.state;
   const layered = layeredState && typeof layeredState === "object" ? layeredState as Record<string, unknown> : undefined;
@@ -1936,6 +1966,12 @@ function fallbackStatusSource(target: Snapshot["targets"][number], sourceById: M
     `${target.key}.position`,
   ];
   return candidates.map((source) => sourceById.get(source)).find(Boolean);
+}
+
+function controllableSource(target: Snapshot["targets"][number], sourceById: Map<string, Snapshot["sources"][number]>) {
+  return sourceById.get(`${target.key}.presence`)
+    ?? sourceById.get(`${target.key}.open`)
+    ?? fallbackStatusSource(target, sourceById);
 }
 
 function deviceBattery(target: Snapshot["targets"][number], sourceById: Map<string, Snapshot["sources"][number]>) {

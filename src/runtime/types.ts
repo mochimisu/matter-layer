@@ -140,6 +140,7 @@ export type RuntimeEvent =
   | { type: "rule.run"; name: string }
   | { type: "device.event"; event: string }
   | { type: "provider.changed"; provider: ProviderName }
+  | { type: "scene.changed"; room: string }
   | { type: "layer.changed"; target: string; layer: LayerName; output: LayerOutput | null; key?: string }
   | { type: "command"; result: CommandResult }
   | { type: "matter.log"; log: MatterLogEntry };

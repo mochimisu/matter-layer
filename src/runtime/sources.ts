@@ -4,7 +4,8 @@ import type { ProviderName, SourceBinding, SourceId, SourceUpdate } from "./type
 export class SourceRef<T = unknown> {
   readonly source: SourceId;
   readonly binding: SourceBinding;
-  private current: T | undefined;
+  private observedValue: T | undefined;
+  private overrideValue?: { value: T; reason?: string; expiresAt?: number; since: number };
   private sinceAt: number | undefined;
   private updatedAt: number | undefined;
 
@@ -15,11 +16,19 @@ export class SourceRef<T = unknown> {
 
   read(): T {
     recordRead(this.source);
-    return this.current as T;
+    return this.peek() as T;
   }
 
   peek(): T | undefined {
-    return this.current;
+    return this.overrideValue?.value ?? this.observedValue;
+  }
+
+  observed(): T | undefined {
+    return this.observedValue;
+  }
+
+  override() {
+    return this.overrideValue;
   }
 
   since(): number | undefined {
@@ -34,12 +43,38 @@ export class SourceRef<T = unknown> {
     if (options.markUpdated !== false) {
       this.updatedAt = observedAt;
     }
-    if (Object.is(this.current, value)) {
+    const previous = this.peek();
+    if (Object.is(this.observedValue, value)) {
       return false;
     }
-    this.current = value;
-    this.sinceAt = observedAt;
-    return true;
+    this.observedValue = value;
+    if (!this.overrideValue && !Object.is(previous, value)) {
+      this.sinceAt = observedAt;
+      return true;
+    }
+    return false;
+  }
+
+  setOverride(value: T, options: { reason?: string; expiresAt?: number; since?: number } = {}) {
+    const previous = this.peek();
+    const since = options.since ?? Date.now();
+    this.overrideValue = { value, reason: options.reason, expiresAt: options.expiresAt, since };
+    if (!Object.is(previous, value)) {
+      this.sinceAt = since;
+      return true;
+    }
+    return false;
+  }
+
+  clearOverride(at = Date.now()) {
+    if (!this.overrideValue) return false;
+    const previous = this.peek();
+    this.overrideValue = undefined;
+    if (!Object.is(previous, this.observedValue)) {
+      this.sinceAt = at;
+      return true;
+    }
+    return false;
   }
 }
 

@@ -6,7 +6,7 @@ import type { LayerOutput, RuleRegistration } from "./types";
 export type RoomModule = {
   room: string;
   kind: "devices" | "rules";
-  setup: (context: any) => void;
+  setup: (context: RoomDevicesContext | RoomRulesContext) => void;
 };
 
 export type Ruleset = {
@@ -14,29 +14,51 @@ export type Ruleset = {
   rules: RoomModule[];
 };
 
-let activeRuleRegistrar: ((name: string, run: () => void) => void) | null = null;
+export type RuleHandle = {
+  readonly __matterLayerRule: true;
+  readonly name: string;
+  readonly run: () => void;
+};
 
-export function defineRoomDevices(room: string, setup: (context: any) => void): RoomModule {
-  return { room, kind: "devices", setup };
+export type SceneHandle = {
+  readonly __matterLayerScene: true;
+  readonly name: string;
+  readonly rules: readonly RuleHandle[];
+};
+
+export type RuleRegistrar = (name: string, run: () => void) => RuleHandle;
+export type SceneRegistrar = (
+  name: string,
+  entries: RuleHandle | SceneHandle | Array<RuleHandle | SceneHandle>,
+) => SceneHandle;
+export type RoomDevicesContext<Room = any, Rooms = any> = {
+  room: Room;
+  rooms: Rooms;
+  matter: Record<string, unknown>;
+};
+export type RoomRulesContext<Room = any, Rooms = any> = {
+  room: Room;
+  rooms: Rooms;
+  rule: RuleRegistrar;
+  scene: SceneRegistrar;
+};
+
+export function defineRoomDevices<Room = any, Rooms = any>(
+  room: string,
+  setup: (context: RoomDevicesContext<Room, Rooms>) => void,
+): RoomModule {
+  return { room, kind: "devices", setup: setup as RoomModule["setup"] };
 }
 
-export function defineRoomRules(room: string, setup: (context: any) => void): RoomModule {
-  return { room, kind: "rules", setup };
+export function defineRoomRules<Room = any, Rooms = any>(
+  room: string,
+  setup: (context: RoomRulesContext<Room, Rooms>) => void,
+): RoomModule {
+  return { room, kind: "rules", setup: setup as RoomModule["setup"] };
 }
 
 export function defineRules(ruleset: Ruleset) {
   return ruleset;
-}
-
-export function setRuleRegistrar(registrar: ((name: string, run: () => void) => void) | null) {
-  activeRuleRegistrar = registrar;
-}
-
-export function rule(name: string, run: (() => void) | (() => () => void)) {
-  if (!activeRuleRegistrar) {
-    throw new Error("rule(...) called outside defineRoomRules");
-  }
-  activeRuleRegistrar(name, run as () => void);
 }
 
 export function any(...values: unknown[]) {

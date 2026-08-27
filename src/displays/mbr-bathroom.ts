@@ -7,7 +7,7 @@ export default {
   hiddenTargets: ["mbrBathroom.environment"],
   stats: [
     { label: "Temp", source: "mbrBathroom.mainPresence.temperature", unit: "°", format: "integer" },
-    { label: "Humidity", source: "mbrBathroom.environment.humidity", unit: "%", format: "integer" },
+    { label: "Humidity", signal: "mbrBathroom.humidity", unit: "%", format: "integer" },
     { label: "Mode", signal: "mbrBathroom.daytime", format: "day-night" },
   ],
 } satisfies EpaperDisplayDefinition;

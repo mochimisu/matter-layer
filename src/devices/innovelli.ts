@@ -1,10 +1,11 @@
-import { activeLayer, eventAction, light, rule } from "matter-layer/devices";
-import type { Light, LightOptions } from "matter-layer/devices";
+import { activeLayer, eventAction, internalRule, light } from "../runtime/devices";
+import type { LightOptions, TargetDevice as Light } from "../runtime/devices";
 import { parseDuration } from "../runtime/state";
 import type { LayerName } from "../runtime/types";
 
 const ledColors: Partial<Record<LayerName, string>> = {
   automation: "green",
+  scene: "green",
   webOverride: "purple",
   override: "purple",
 };
@@ -41,25 +42,7 @@ export function innovelli(key: string, options: LightOptions = {}): Light {
   led.set({ power: "on", color: "green", level: "2%" }, { layer: "default", reason: "Status LED idle" });
   const dimmerLayer = activeLayer(device.key);
 
-  device.auto = (
-    value: boolean | Record<string, unknown> | null | undefined,
-  ) => {
-    const write = () => {
-      if (value === true) {
-        device.set({ ...device.defaults }, { layer: "automation" });
-      } else if (value === false) {
-        device.set({ power: "off" }, { layer: "automation" });
-      } else if (value) {
-        device.set(value, { layer: "automation" });
-      } else {
-        device.set(null, { layer: "automation" });
-      }
-    };
-    write();
-    return write;
-  };
-
-  rule(`${key}.status-led`, () => {
+  internalRule(`${key}.status-led`, () => {
     const active = dimmerLayer.read();
     if (!active || !ledColors[active.layer]) {
       led.set(null, { layer: "automation" });

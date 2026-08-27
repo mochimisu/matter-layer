@@ -68,4 +68,21 @@ describe("snapshot deltas", () => {
     expect(snapshot.matterLog).toHaveLength(3);
     expect(snapshot.providers[0].status?.resolved?.[0].available).toBe(false);
   });
+
+  it("applies scene selection deltas", () => {
+    const snapshot = {
+      ...baseSnapshot(),
+      scenes: [{ room: "office", options: ["Default", "Dark"], selected: "Default", rules: ["office.default"] }],
+    };
+    const next = applySnapshotDelta(snapshot, {
+      type: "scene",
+      scene: { room: "office", options: ["Default", "Dark"], selected: "Dark", rules: ["office.default", "office.dark"] },
+    });
+    expect(next.scenes).toEqual([{
+      room: "office",
+      options: ["Default", "Dark"],
+      selected: "Dark",
+      rules: ["office.default", "office.dark"],
+    }]);
+  });
 });

@@ -137,6 +137,45 @@ async function main() {
     res.json(runtime.snapshot());
   });
 
+  app.post("/api/sources/:source/override", (req, res) => {
+    const source = req.params.source;
+    if (!runtime.sources.has(source)) {
+      res.status(404).json({ error: "unknown source" });
+      return;
+    }
+    const { value, ttl, reason } = req.body ?? {};
+    if (value === undefined) {
+      res.status(400).json({ error: "value is required" });
+      return;
+    }
+    runtime.setSourceOverride(source, value, {
+      ttl: typeof ttl === "string" && ttl.length > 0 ? ttl : undefined,
+      reason: typeof reason === "string" && reason.length > 0 ? reason : undefined,
+    });
+    res.json(runtime.snapshot());
+  });
+
+  app.delete("/api/sources/:source/override", (req, res) => {
+    if (!runtime.clearSourceOverride(req.params.source)) {
+      res.status(404).json({ error: "unknown source" });
+      return;
+    }
+    res.json(runtime.snapshot());
+  });
+
+  app.post("/api/scenes/:room", (req, res) => {
+    const selected = req.body?.scene;
+    if (typeof selected !== "string") {
+      res.status(400).json({ error: "scene is required" });
+      return;
+    }
+    if (!runtime.setScene(req.params.room, selected)) {
+      res.status(404).json({ error: "unknown room or scene" });
+      return;
+    }
+    res.json(runtime.snapshot());
+  });
+
   app.post("/api/devices/:target/matter-ping", async (req, res) => {
     const target = req.params.target;
     if (!runtime.targets.has(target)) {
@@ -496,6 +535,8 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
             source: {
               ...source.binding,
               value: source.peek(),
+              observedValue: source.observed(),
+              override: source.override(),
               since: source.since(),
               updatedAt: source.updated(),
             },
@@ -539,6 +580,10 @@ function deltaForEvent(runtime: MatterLayerRuntime, event: RuntimeEvent) {
     case "provider.changed": {
       const provider = runtime.snapshot().providers.find((item) => item.name === event.provider);
       return provider ? { type: "provider", provider } : { type: "event" };
+    }
+    case "scene.changed": {
+      const scene = runtime.snapshot().scenes.find((item) => item.room === event.room);
+      return scene ? { type: "scene", scene } : { type: "event" };
     }
     case "layer.changed":
       return {

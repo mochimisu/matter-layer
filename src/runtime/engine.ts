@@ -3,8 +3,9 @@ import {
   createDefinitionRoom,
   createRoomProxy,
   createRuleRegistration,
-  setRuleRegistrar,
+  type RuleHandle,
   type RoomModule,
+  type SceneHandle,
 } from "./dsl";
 import { defaultLayerItem, LayerStore } from "./layers";
 import { SourceRef } from "./sources";
@@ -31,6 +32,22 @@ import type {
   TargetBinding,
 } from "./types";
 
+type AuthoredRule = RuleHandle & {
+  readonly outputs: Set<string>;
+};
+
+type AuthoredScene = Omit<SceneHandle, "rules"> & {
+  readonly rules: readonly AuthoredRule[];
+};
+
+type SceneRegistration = {
+  room: string;
+  options: string[];
+  selected: string;
+  source: SourceRef<string>;
+  stacks: Map<string, readonly AuthoredRule[]>;
+};
+
 export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   readonly events = new EventEmitter();
   readonly rooms = new Map<string, Record<string, unknown>>();
@@ -46,13 +63,17 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
   readonly eventHandlers = new Map<string, Set<() => void>>();
   readonly sourceHandlers = new Map<string, Set<(update: SourceUpdate) => void>>();
   readonly eventActions = new Map<string, { name: string; event: string; outputs: Set<string>; lastRunAt?: number }>();
+  readonly scenes = new Map<string, SceneRegistration>();
   private readonly applyingTargets = new Set<string>();
   private readonly pendingCommands = new Map<string, DesiredCommand>();
   private readonly scheduled = new Map<string, NodeJS.Timeout>();
   private readonly forceApplyTargets = new Set<string>();
+  private readonly batchedApplyTargets = new Set<string>();
   private nextMatterLogId = 0;
   private clock?: NodeJS.Timeout;
   private activeRule?: string;
+  private activeSceneRule?: { rule: AuthoredRule; rank: number };
+  private applyBatchDepth = 0;
   private overridePersistence?: OverridePersistence;
   private restoringOverrides = false;
   private started = false;
@@ -127,11 +148,16 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     const rule = this.rules.get(this.activeRule);
     rule?.outputs.add(target);
     rule?.outputWrites.set(target, hasOutput);
+    this.activeSceneRule?.rule.outputs.add(target);
   }
 
   writeLayer(target: string, layer: LayerName, output: LayerOutput | null, key?: string) {
     const before = this.layerFingerprint(target);
-    this.layers.write(target, layer, output, key);
+    const activeSceneRule = this.activeSceneRule;
+    const itemRank = layer === "scene" && activeSceneRule && key === activeSceneRule.rule.name
+      ? activeSceneRule.rank
+      : undefined;
+    this.layers.write(target, layer, output, key, itemRank);
     if (layer === "automation" && key && key !== defaultLayerItem) {
       this.layers.clear(target, layer, defaultLayerItem);
     }
@@ -168,7 +194,18 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     return this.layers.surface(target);
   }
 
+  lowerRuleState(target: string) {
+    if (!this.activeSceneRule) {
+      throw new Error("device.lowerState() can only be read inside a scene-composed rule");
+    }
+    return this.layers.stateBelow(target, "scene", this.activeSceneRule.rank);
+  }
+
   enqueueApply(target: string) {
+    if (this.applyBatchDepth > 0) {
+      this.batchedApplyTargets.add(target);
+      return;
+    }
     if (!this.started) {
       return;
     }
@@ -278,7 +315,10 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       }
       return;
     }
-    if (!source.update(update.value, update.observedAt, { markUpdated: update.markUpdated })) {
+    const previousObserved = source.observed();
+    const effectiveChanged = source.update(update.value, update.observedAt, { markUpdated: update.markUpdated });
+    const observedChanged = !Object.is(previousObserved, source.observed());
+    if (!effectiveChanged && !observedChanged) {
       return;
     }
     if (update.provider === "matter") {
@@ -293,10 +333,36 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       });
     }
     this.emit({ type: "source.changed", update });
+    if (!effectiveChanged) {
+      return;
+    }
     this.dispatchSourceChange(update);
     this.evaluateAffectedSignals(update.source);
     this.runAffected(update.source);
     this.reconcileTargetsForSource(update);
+  }
+
+  setSourceOverride(sourceId: string, value: unknown, options: { reason?: string; ttl?: string } = {}) {
+    const source = this.sources.get(sourceId);
+    if (!source) return false;
+    const now = Date.now();
+    const expiresAt = options.ttl ? now + parseDuration(options.ttl) : undefined;
+    const reason = options.reason ?? "Source override";
+    const changed = source.setOverride(value, { reason, expiresAt, since: now });
+    this.overridePersistence?.setSourceOverride({ source: sourceId, value, reason, expiresAt, updatedAt: now }, sourceId);
+    if (expiresAt) this.scheduleAt(expiresAt, `sourceOverride.${sourceId}`);
+    this.publishSourceOverrideChange(source, changed, now);
+    return true;
+  }
+
+  clearSourceOverride(sourceId: string) {
+    const source = this.sources.get(sourceId);
+    if (!source) return false;
+    const now = Date.now();
+    const changed = source.clearOverride(now);
+    this.overridePersistence?.setSourceOverride(null, sourceId);
+    this.publishSourceOverrideChange(source, changed, now);
+    return true;
   }
 
   async start() {
@@ -332,39 +398,81 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
 
   loadModules(modules: { devices: RoomModule[]; rules: RoomModule[] }) {
     setDeviceRuntime(this);
-    try {
-      for (const module of modules.devices) {
-        const state = this.roomState(module.room);
-        module.setup({
-          room: createDefinitionRoom(state),
-          rooms: this.roomProxyMap(),
-          matter: {},
-        });
-      }
-      for (const module of modules.rules) {
-        const state = this.roomState(module.room);
-        const room = createRoomProxy(state);
-        this.ruleRooms.set(module.room, room);
-        setRuleRegistrar((name, run) => {
-          const id = `${module.room}.${name}`;
-          this.rules.set(id, createRuleRegistration(id, run));
-        });
-        module.setup({
-          room,
-          rooms: this.roomProxyMap(),
-          rule: (name: string, run: any) => {
-            const maybeRun = typeof run === "function" ? run : () => run;
-            const id = `${module.room}.${name}`;
-            this.rules.set(id, createRuleRegistration(id, maybeRun));
-          },
-        });
-        setRuleRegistrar(null);
-      }
-      this.collectSignals();
-      this.evaluateAllSignals();
-    } finally {
-      setRuleRegistrar(null);
+    for (const module of modules.devices) {
+      const state = this.roomState(module.room);
+      module.setup({
+        room: createDefinitionRoom(state),
+        rooms: this.roomProxyMap(),
+        matter: {},
+      });
     }
+    for (const module of modules.rules) {
+      const state = this.roomState(module.room);
+      const room = createRoomProxy(state);
+      this.ruleRooms.set(module.room, room);
+      const authoredRules: AuthoredRule[] = [];
+      const authoredScenes: AuthoredScene[] = [];
+      const registerAuthoredRule = (name: string, run: () => void) => {
+        const id = `${module.room}.${name}`;
+        if (authoredRules.some((rule) => rule.name === id)) {
+          throw new Error(`Duplicate rule ${id}`);
+        }
+        const handle: AuthoredRule = {
+          __matterLayerRule: true,
+          name: id,
+          run,
+          outputs: new Set(),
+        };
+        authoredRules.push(handle);
+        return handle;
+      };
+      module.setup({
+        room,
+        rooms: this.roomProxyMap(),
+        scene: (name: string, entries: RuleHandle | SceneHandle | Array<RuleHandle | SceneHandle>) => {
+          if (typeof name !== "string" || !name) {
+            throw new Error(`Scene ${module.room}.${String(name)} requires a non-empty name`);
+          }
+          const stack: AuthoredRule[] = [];
+          for (const entry of Array.isArray(entries) ? entries : [entries]) {
+            if (entry && "__matterLayerRule" in entry && authoredRules.includes(entry as AuthoredRule)) {
+              stack.push(entry as AuthoredRule);
+              continue;
+            }
+            if (entry && "__matterLayerScene" in entry && authoredScenes.includes(entry as AuthoredScene)) {
+              stack.push(...(entry as AuthoredScene).rules);
+              continue;
+            }
+            throw new Error(`Scene ${module.room}.${String(name)} contains a rule or scene from outside this room`);
+          }
+          if (stack.length === 0) {
+            throw new Error(`Scene ${module.room}.${String(name)} requires one or more rule(...) or scene(...) handles`);
+          }
+          if (authoredScenes.some((scene) => scene.name === name)) {
+            throw new Error(`Duplicate scene ${module.room}.${name}`);
+          }
+          const handle: AuthoredScene = {
+            __matterLayerScene: true,
+            name,
+            rules: [...new Set(stack)],
+          };
+          authoredScenes.push(handle);
+          return handle;
+        },
+        rule: registerAuthoredRule,
+      });
+      const composedRules = new Set(authoredScenes.flatMap((scene) => scene.rules));
+      for (const rule of authoredRules) {
+        if (!composedRules.has(rule)) {
+          this.rules.set(rule.name, createRuleRegistration(rule.name, rule.run));
+        }
+      }
+      if (authoredScenes.length > 0) {
+        this.registerScene(module.room, authoredScenes);
+      }
+    }
+    this.collectSignals();
+    this.evaluateAllSignals();
   }
 
   runAll() {
@@ -378,8 +486,11 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     if (!rule || !rule.enabled) {
       return;
     }
+    const previousRule = this.activeRule;
+    const previousSceneRule = this.activeSceneRule;
     try {
       this.activeRule = rule.name;
+      this.activeSceneRule = undefined;
       rule.outputs.clear();
       rule.outputWrites.clear();
       setActiveRuleName(rule.name);
@@ -392,8 +503,13 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     } catch (error) {
       rule.lastError = error instanceof Error ? error.message : String(error);
     } finally {
-      setActiveRuleName(null);
-      this.activeRule = undefined;
+      this.activeRule = previousRule;
+      this.activeSceneRule = previousSceneRule;
+      if (previousSceneRule) {
+        setActiveRuleName(previousSceneRule.rule.name, "scene");
+      } else {
+        setActiveRuleName(previousRule ?? null);
+      }
     }
   }
 
@@ -428,6 +544,104 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
 
   setBooleanSetting(key: string, value: boolean) {
     this.overridePersistence?.setSetting(key, value);
+  }
+
+  registerScene(room: string, declarations: ReadonlyArray<{ name: string; rules: readonly AuthoredRule[] }>) {
+    const normalized = [...new Set(declarations.map((scene) => scene.name).filter(Boolean))];
+    if (normalized.length !== declarations.length) throw new Error(`Scene names for ${room} must be unique and non-empty`);
+    const stored = this.overridePersistence?.getSetting(`scene.${room}`);
+    const selected = typeof stored === "string" && normalized.includes(stored) ? stored : normalized[0];
+    const source = new SourceRef<string>({
+      source: `${room}.scene`,
+      key: room,
+      property: "scene",
+      provider: "synthetic",
+    });
+    source.update(selected);
+    this.registerSource(source);
+    const stacks = new Map(declarations.map((scene) => [scene.name, scene.rules]));
+    this.scenes.set(room, { room, options: normalized, selected, source, stacks });
+    Object.defineProperty(this.roomState(room), "scene", {
+      configurable: true,
+      enumerable: true,
+      get: () => source.read(),
+    });
+    const id = `${room}.scene`;
+    // Startup applies the stored scene through runAll(); it must not use setScene(),
+    // because persisted overrides are restored before that initial rule run.
+    this.rules.set(id, createRuleRegistration(id, () => this.runSceneStack(room)));
+  }
+
+  setScene(room: string, selected: string) {
+    const scene = this.scenes.get(room);
+    if (!scene || !scene.options.includes(selected)) return false;
+    if (scene.selected === selected) return true;
+    const sceneRule = this.rules.get(`${room}.scene`);
+    const affectedTargets = new Set(sceneRule?.outputs ?? []);
+    this.withApplyBatch(() => {
+      scene.selected = selected;
+      this.overridePersistence?.setSetting(`scene.${room}`, selected);
+      this.updateSource({ source: scene.source.source, value: selected, provider: "synthetic", observedAt: Date.now() });
+      for (const target of sceneRule?.outputs ?? []) affectedTargets.add(target);
+      // A real transition resets manual opinions on targets owned by either
+      // side of the transition. Initial startup never reaches this path.
+      for (const target of affectedTargets) {
+        this.clearLayer(target, "override");
+        this.clearLayer(target, "webOverride");
+      }
+    });
+    this.emit({ type: "scene.changed", room });
+    return true;
+  }
+
+  private runSceneStack(room: string) {
+    const scene = this.scenes.get(room);
+    if (!scene) return;
+    const selected = scene.source.read();
+    const stack = scene.stacks.get(selected) ?? [];
+    const activeRules = new Set(stack);
+    const allRules = new Set([...scene.stacks.values()].flat());
+
+    this.withApplyBatch(() => {
+      for (const rule of allRules) {
+        if (activeRules.has(rule)) continue;
+        for (const target of rule.outputs) {
+          this.clearLayer(target, "scene", rule.name);
+        }
+      }
+
+      for (const [rank, rule] of stack.entries()) {
+        const previousOutputs = new Set(rule.outputs);
+        rule.outputs.clear();
+        this.activeSceneRule = { rule, rank };
+        setActiveRuleName(rule.name, "scene");
+        try {
+          rule.run();
+        } finally {
+          this.activeSceneRule = undefined;
+          setActiveRuleName(this.activeRule ?? null);
+        }
+        for (const target of previousOutputs) {
+          if (!rule.outputs.has(target)) {
+            this.clearLayer(target, "scene", rule.name);
+          }
+        }
+      }
+    });
+  }
+
+  private withApplyBatch<T>(run: () => T): T {
+    this.applyBatchDepth += 1;
+    try {
+      return run();
+    } finally {
+      this.applyBatchDepth -= 1;
+      if (this.applyBatchDepth === 0) {
+        const targets = [...this.batchedApplyTargets];
+        this.batchedApplyTargets.clear();
+        for (const target of targets) this.enqueueApply(target);
+      }
+    }
   }
 
   dispatchEvent(event: string) {
@@ -492,6 +706,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         observedAt: Date.now(),
       });
       this.expireLayers();
+      this.expireSourceOverrides();
     }, delay);
     this.scheduled.set(reason, timeout);
   }
@@ -537,6 +752,8 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       sources: [...this.sources.values()].map((source) => ({
         ...source.binding,
         value: source.peek(),
+        observedValue: source.observed(),
+        override: source.override(),
         since: source.since(),
         updatedAt: source.updated(),
       })),
@@ -572,6 +789,12 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         lastRunAt: action.lastRunAt,
       })),
       pulses: pulseSnapshot(),
+      scenes: [...this.scenes.values()].map(({ room, options, selected, stacks }) => ({
+        room,
+        options,
+        selected,
+        rules: (stacks.get(selected) ?? []).map((rule) => rule.name),
+      })),
       providers: [...this.providers.values()].map((provider) => ({
         name: provider.name,
         status: provider.snapshot?.() ?? null,
@@ -717,6 +940,7 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       });
       this.updateMinuteSource();
       this.expireLayers();
+      this.expireSourceOverrides();
     }, 100);
   }
 
@@ -780,6 +1004,16 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
         }
         this.updateActiveLayerSource(item.target);
       }
+      for (const item of this.overridePersistence.loadSourceOverrides()) {
+        const source = this.sources.get(item.source);
+        if (!source) continue;
+        source.setOverride(item.value, {
+          reason: item.reason,
+          expiresAt: item.expiresAt,
+          since: item.updatedAt,
+        });
+        if (item.expiresAt) this.scheduleAt(item.expiresAt, `sourceOverride.${item.source}`);
+      }
     } finally {
       this.restoringOverrides = false;
     }
@@ -790,6 +1024,32 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
       return;
     }
     this.overridePersistence?.replaceTarget(target, this.layers.items(target, "override"));
+  }
+
+  private expireSourceOverrides() {
+    const now = Date.now();
+    for (const source of this.sources.values()) {
+      const override = source.override();
+      if (!override?.expiresAt || override.expiresAt > now) continue;
+      const changed = source.clearOverride(now);
+      this.overridePersistence?.setSourceOverride(null, source.source);
+      this.publishSourceOverrideChange(source, changed, now);
+    }
+  }
+
+  private publishSourceOverrideChange(source: SourceRef, effectiveChanged: boolean, observedAt: number) {
+    const update: SourceUpdate = {
+      source: source.source,
+      value: source.peek(),
+      provider: "synthetic",
+      observedAt,
+    };
+    this.emit({ type: "source.changed", update });
+    if (!effectiveChanged) return;
+    this.dispatchSourceChange(update);
+    this.evaluateAffectedSignals(source.source);
+    this.runAffected(source.source);
+    this.reconcileTargetsForSource(update);
   }
 
   private commandObservedStatus(command: DesiredCommand) {

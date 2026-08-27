@@ -1,5 +1,14 @@
 export type Snapshot = {
-  sources: Array<{ source: string; key: string; property: string; value: unknown; since?: number; updatedAt?: number }>;
+  sources: Array<{
+    source: string;
+    key: string;
+    property: string;
+    value: unknown;
+    observedValue?: unknown;
+    override?: { value: unknown; reason?: string; expiresAt?: number; since: number };
+    since?: number;
+    updatedAt?: number;
+  }>;
   signals: Array<{ id: string; value: unknown; deps: string[]; initialized: boolean; lastRunAt?: number }>;
   targets: Array<{
     target: string;
@@ -75,6 +84,7 @@ export type Snapshot = {
   events: string[];
   eventActions?: Array<{ name: string; event: string; outputs: string[]; lastRunAt?: number }>;
   pulses?: Array<{ source: string; lastTriggeredAt: number; duration: number }>;
+  scenes?: Array<{ room: string; options: string[]; selected: string; rules?: string[] }>;
   providers: Array<{
     name: string;
     status: {
@@ -97,6 +107,7 @@ export type SnapshotDelta =
   | { type: "rule"; rule: Snapshot["rules"][number] }
   | { type: "layer"; layer: Snapshot["layers"][number] }
   | { type: "provider"; provider: Snapshot["providers"][number] }
+  | { type: "scene"; scene: NonNullable<Snapshot["scenes"]>[number] }
   | { type: "command"; command: unknown; log?: NonNullable<Snapshot["matterLog"]>[number] }
   | { type: "matterLog"; log: NonNullable<Snapshot["matterLog"]>[number] };
 
@@ -125,6 +136,8 @@ export function applySnapshotDelta(snapshot: Snapshot, delta: SnapshotDelta): Sn
       return { ...snapshot, layers: replaceItem(snapshot.layers, (layer) => layer.target === delta.layer.target, delta.layer) };
     case "provider":
       return { ...snapshot, providers: replaceItem(snapshot.providers, (provider) => provider.name === delta.provider.name, delta.provider) };
+    case "scene":
+      return { ...snapshot, scenes: replaceItem(snapshot.scenes ?? [], (scene) => scene.room === delta.scene.room, delta.scene) };
     case "command":
       return {
         ...snapshot,

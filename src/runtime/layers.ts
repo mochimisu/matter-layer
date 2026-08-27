@@ -16,9 +16,10 @@ const overrideInputItem = "input";
 export class LayerStore {
   private outputs = new Map<TargetId, Map<LayerName, Map<string, LayerOutput>>>();
   private writtenAt = new Map<string, number>();
+  private itemRanks = new Map<string, number>();
   private lastDesired = new Map<TargetId, string>();
 
-  write(target: TargetId, layer: LayerName, output: LayerOutput | null, itemKey?: string) {
+  write(target: TargetId, layer: LayerName, output: LayerOutput | null, itemKey?: string, itemRank?: number) {
     let targetLayers = this.outputs.get(target);
     if (!targetLayers) {
       targetLayers = new Map();
@@ -29,6 +30,7 @@ export class LayerStore {
       if (itemKey) {
         targetLayers.get(layer)?.delete(key);
         this.writtenAt.delete(layerKey(target, layer, key));
+        this.itemRanks.delete(layerKey(target, layer, key));
         if (targetLayers.get(layer)?.size === 0) targetLayers.delete(layer);
       } else {
         this.clear(target, layer);
@@ -43,8 +45,14 @@ export class LayerStore {
     if (output.state === null) {
       bucket.delete(key);
       this.writtenAt.delete(layerKey(target, layer, key));
+      this.itemRanks.delete(layerKey(target, layer, key));
       if (bucket.size === 0) targetLayers.delete(layer);
       return;
+    }
+    if (itemRank === undefined) {
+      this.itemRanks.delete(layerKey(target, layer, key));
+    } else {
+      this.itemRanks.set(layerKey(target, layer, key), itemRank);
     }
     const previous = bucket.get(key);
     if (!previous || JSON.stringify(previous) !== JSON.stringify(output)) {
@@ -62,7 +70,7 @@ export class LayerStore {
   }
 
   items(target: TargetId, layer: LayerName) {
-    return [...(this.outputs.get(target)?.get(layer)?.entries() ?? [])].map(([key, output]) => ({ key, output }));
+    return this.bucketEntries(target, layer).map(([key, output]) => ({ key, output }));
   }
 
   clear(target: TargetId, layer: LayerName, itemKey?: string) {
@@ -72,11 +80,13 @@ export class LayerStore {
       const bucket = targetLayers.get(layer);
       bucket?.delete(itemKey);
       this.writtenAt.delete(layerKey(target, layer, itemKey));
+      this.itemRanks.delete(layerKey(target, layer, itemKey));
       if (bucket?.size === 0) targetLayers.delete(layer);
       return;
     }
     for (const key of targetLayers.get(layer)?.keys() ?? []) {
       this.writtenAt.delete(layerKey(target, layer, key));
+      this.itemRanks.delete(layerKey(target, layer, key));
     }
     targetLayers.delete(layer);
   }
@@ -93,7 +103,7 @@ export class LayerStore {
           layer,
           output: surfaced.output,
           since: surfaced.since,
-          items: [...bucket.entries()].map(([key, output]) => ({
+          items: this.bucketEntries(target, layer).map(([key, output]) => ({
             key,
             output,
             since: this.writtenAt.get(layerKey(target, layer, key)),
@@ -122,6 +132,26 @@ export class LayerStore {
     return highest ? { ...highest, output: { ...highest.output, state: combinedState as Record<string, unknown> | null } } : null;
   }
 
+  stateBelow(target: TargetId, layer: LayerName, itemRank: number) {
+    const layers = this.outputs.get(target);
+    if (!layers) return undefined;
+    let combinedState: unknown;
+    for (const candidate of [...layerOrder].reverse()) {
+      if (layerPriority[candidate] > layerPriority[layer]) break;
+      if (candidate !== layer) {
+        const surfaced = this.bucketSurface(target, candidate);
+        if (surfaced) combinedState = mergeState(combinedState, surfaced.output.state);
+        continue;
+      }
+      for (const [key, output] of this.bucketEntries(target, candidate)) {
+        const rank = this.itemRanks.get(layerKey(target, candidate, key));
+        if (rank !== undefined && rank >= itemRank) continue;
+        combinedState = mergeState(combinedState, output.state);
+      }
+    }
+    return combinedState as Record<string, unknown> | null | undefined;
+  }
+
   expire(target: TargetId, now = Date.now()) {
     const layers = this.outputs.get(target);
     if (!layers) {
@@ -134,6 +164,7 @@ export class LayerStore {
         if (output.expiresAt && output.expiresAt <= now) {
           bucket.delete(key);
           this.writtenAt.delete(layerKey(target, layer, key));
+          this.itemRanks.delete(layerKey(target, layer, key));
           layerExpired = true;
         }
       }
@@ -174,7 +205,7 @@ export class LayerStore {
     if (!bucket) return null;
     let combinedState: unknown;
     let last: { key: string; output: LayerOutput; since?: number } | null = null;
-    for (const [key, output] of bucket) {
+    for (const [key, output] of this.bucketEntries(target, layer)) {
       combinedState = mergeState(combinedState, output.state);
       last = { key, output, since: this.writtenAt.get(layerKey(target, layer, key)) };
     }
@@ -185,6 +216,18 @@ export class LayerStore {
           since: last.since,
         }
       : null;
+  }
+
+  private bucketEntries(target: TargetId, layer: LayerName) {
+    const entries = [...(this.outputs.get(target)?.get(layer)?.entries() ?? [])];
+    return entries.sort(([left], [right]) => {
+      const leftRank = this.itemRanks.get(layerKey(target, layer, left));
+      const rightRank = this.itemRanks.get(layerKey(target, layer, right));
+      if (leftRank === undefined && rightRank === undefined) return 0;
+      if (leftRank === undefined) return -1;
+      if (rightRank === undefined) return 1;
+      return leftRank - rightRank;
+    });
   }
 }
 

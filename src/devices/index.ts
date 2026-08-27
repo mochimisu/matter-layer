@@ -1,5 +1,5 @@
 export { fp300 } from "./aqara";
-export { bilresa, bilresaBlinds } from "./bilresa";
+export { bilresa, bilresaBlinds, bindBilresaBlinds } from "./bilresa";
 export { matterLight, matterSwitch } from "./generic";
 export { haEnvironmentSensor } from "./homeAssistant";
 export { alpstuga, myggbett, myggspray, kajplats } from "./ikea";

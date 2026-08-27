@@ -9,6 +9,14 @@ export type PersistedOverrideItem = {
   output: LayerOutput;
 };
 
+export type PersistedSourceOverride = {
+  source: string;
+  value: unknown;
+  reason?: string;
+  expiresAt?: number;
+  updatedAt: number;
+};
+
 export class OverridePersistence {
   private readonly db: DatabaseSync;
 
@@ -31,6 +39,15 @@ export class OverridePersistence {
       create table if not exists app_settings (
         key text primary key,
         value text not null,
+        updated_at integer not null
+      )
+    `);
+    this.db.exec(`
+      create table if not exists source_overrides (
+        source text primary key,
+        value text not null,
+        reason text,
+        expires_at integer,
         updated_at integer not null
       )
     `);
@@ -89,6 +106,39 @@ export class OverridePersistence {
       this.db.exec("rollback");
       throw error;
     }
+  }
+
+  loadSourceOverrides(now = Date.now()): PersistedSourceOverride[] {
+    const rows = this.db.prepare(`
+      select source, value, reason, expires_at as expiresAt, updated_at as updatedAt
+      from source_overrides
+      where expires_at is null or expires_at > ?
+      order by updated_at
+    `).all(now) as Array<{ source: string; value: string; reason?: string | null; expiresAt?: number | null; updatedAt: number }>;
+    this.db.prepare("delete from source_overrides where expires_at is not null and expires_at <= ?").run(now);
+    return rows.map((row) => ({
+      source: row.source,
+      value: JSON.parse(row.value),
+      reason: row.reason ?? undefined,
+      expiresAt: row.expiresAt ?? undefined,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  setSourceOverride(item: PersistedSourceOverride | null, source: string) {
+    if (!item) {
+      this.db.prepare("delete from source_overrides where source = ?").run(source);
+      return;
+    }
+    this.db.prepare(`
+      insert into source_overrides (source, value, reason, expires_at, updated_at)
+      values (?, ?, ?, ?, ?)
+      on conflict(source) do update set
+        value = excluded.value,
+        reason = excluded.reason,
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at
+    `).run(item.source, JSON.stringify(item.value), item.reason ?? null, item.expiresAt ?? null, item.updatedAt);
   }
 
   getSetting(key: string): unknown | undefined {

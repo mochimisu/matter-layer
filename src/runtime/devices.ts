@@ -16,6 +16,7 @@ import type {
 const deviceState = globalThis as typeof globalThis & {
   __matterLayerDeviceRuntime?: DeviceRuntime | null;
   __matterLayerActiveRuleName?: string | null;
+  __matterLayerActiveRuleLayer?: LayerName | null;
 };
 
 export type DeviceRuntime = {
@@ -31,6 +32,7 @@ export type DeviceRuntime = {
   hasLayer(target: TargetId, layer: LayerName, key?: string): boolean;
   layerOutput(target: TargetId, layer: LayerName, key?: string): LayerOutput | undefined;
   surfaceLayer(target: TargetId): { layer: LayerName; output: LayerOutput; since?: number } | null;
+  lowerRuleState(target: TargetId): Record<string, unknown> | null | undefined;
   updateSource(update: SourceUpdate): void;
   enqueueApply(target: TargetId): void;
   forceApplyNext(target: TargetId): void;
@@ -48,8 +50,9 @@ export function setDeviceRuntime(runtime: DeviceRuntime | null) {
   deviceState.__matterLayerDeviceRuntime = runtime;
 }
 
-export function setActiveRuleName(name: string | null) {
+export function setActiveRuleName(name: string | null, layer: LayerName | null = name ? "automation" : null) {
   deviceState.__matterLayerActiveRuleName = name;
+  deviceState.__matterLayerActiveRuleLayer = layer;
 }
 
 function runtime() {
@@ -163,27 +166,39 @@ export class TargetDevice {
   }
 
   set(state: Record<string, unknown> | null, options: { layer?: LayerName; reason?: string; writer?: string } = {}) {
-    const layer = options.layer ?? "automation";
-    const writer = options.writer ?? (layer === "automation" ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined);
+    const layer = options.layer ?? deviceState.__matterLayerActiveRuleLayer ?? "automation";
+    const ruleOwnedLayer = layer === "automation" || layer === "scene";
+    const writer = options.writer ?? (ruleOwnedLayer ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined);
     runtime().writeLayer(this.key, layer, {
       state,
-      reason: options.reason ?? (layer === "automation" ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined),
+      reason: options.reason ?? (ruleOwnedLayer ? deviceState.__matterLayerActiveRuleName ?? undefined : undefined),
       writer,
     }, writer);
     runtime().recordRuleOutput(this.key, state !== null);
     runtime().enqueueApply(this.key);
   }
 
-  auto(value: boolean | Record<string, unknown> | null | undefined) {
-    const write = () => {
-      this.set(normalizeAutoValue(value, this.defaults), { layer: "automation" });
-    };
-    write();
-    return write;
+  /**
+   * Writes this rule's current opinion. `true` uses the device's on-defaults,
+   * `false` writes off, an object writes that state, and null clears the
+   * opinion. Standalone rules write automation; scene-composed rules write the
+   * scene layer.
+   */
+  auto(value: boolean | Record<string, unknown> | null | undefined): void {
+    this.set(normalizeAutoValue(value, this.defaults));
   }
 
   forceApplyNext() {
     runtime().forceApplyNext(this.key);
+  }
+
+  lowerState() {
+    return runtime().lowerRuleState(this.key);
+  }
+
+  /** @deprecated Use lowerState() for explicit scene-layer semantics. */
+  lower() {
+    return this.lowerState();
   }
 
   endpoint(endpointId: number) {
@@ -259,7 +274,7 @@ export function activeLayer(target: TargetId) {
   return source;
 }
 
-export function rule(name: string, run: () => void) {
+export function internalRule(name: string, run: () => void) {
   runtime().registerInternalRule(name, run);
 }
 
@@ -267,15 +282,15 @@ export class CoverDevice extends TargetDevice {
   private activeLayerSource?: SourceRef<ActiveLayerState>;
 
   open() {
-    this.set({ position: "open" }, { layer: "automation" });
+    this.set({ position: "open" });
   }
 
   close() {
-    this.set({ position: "closed" }, { layer: "automation" });
+    this.set({ position: "closed" });
   }
 
   stop() {
-    this.set({ motion: "stop" }, { layer: "automation" });
+    this.set({ motion: "stop" });
   }
 
   onPositionChange(handler: (position: unknown, update: SourceUpdate) => void) {

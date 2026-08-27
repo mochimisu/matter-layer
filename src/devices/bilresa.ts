@@ -1,4 +1,4 @@
-import { eventAction, remote, rule } from "matter-layer/devices";
+import { eventAction, internalRule, remote } from "../runtime/devices";
 import { state } from "matter-layer/rules";
 import type { CoverGroup, Remote } from "matter-layer/rules";
 
@@ -28,12 +28,12 @@ export function bilresa(key: string): Remote {
   });
 }
 
-export function bilresaBlinds(remote: Remote, covers: CoverGroup) {
+export function bindBilresaBlinds(remote: Remote, covers: CoverGroup) {
   const intents = blindIntents(covers);
   const outputs = covers.covers.map((cover) => cover.key);
   eventAction(`${remote.key}.open-blinds`, `${remote.key}.button.1.initialPress`, outputs);
   eventAction(`${remote.key}.close-blinds`, `${remote.key}.button.2.initialPress`, outputs);
-  rule(`${remote.key}.persist-manual-blind-input`, () => intents.persistManualOverrides());
+  internalRule(`${remote.key}.persist-manual-blind-input`, () => intents.persistManualOverrides());
 
   remote.onInitialPress(1, () => {
     intents.remoteOpen();
@@ -43,6 +43,9 @@ export function bilresaBlinds(remote: Remote, covers: CoverGroup) {
     intents.remoteClose();
   });
 }
+
+/** @deprecated Use bindBilresaBlinds to make the side-effectful binding explicit. */
+export const bilresaBlinds = bindBilresaBlinds;
 
 function blindIntents(covers: CoverGroup) {
   if (covers.state.blindIntents) {
@@ -134,7 +137,8 @@ function createBlindIntents(covers: CoverGroup) {
     cover.onActiveLayerChange((active) => {
       const isAutomationCommand = active?.layer === "automation";
       const isWebCommand = active?.layer === "override" && active.writer === "web";
-      if (!isAutomationCommand && !isWebCommand) {
+      const isSceneCommand = active?.layer === "scene";
+      if (!isAutomationCommand && !isWebCommand && !isSceneCommand) {
         return;
       }
       const motion = motionFromState(active.state);

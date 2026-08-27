@@ -289,6 +289,14 @@ button {
     @apply h-px min-w-8 flex-1 bg-[#b8beb3];
   }
 
+  .device-room-scene {
+    @apply flex shrink-0 items-center gap-2 text-[0.68rem] font-black uppercase tracking-[0.08em] text-gaia-muted;
+  }
+
+  .device-room-scene select {
+    @apply min-h-8 border border-gaia-line bg-gaia-paper px-2 text-xs font-black normal-case tracking-normal text-gaia-ink disabled:cursor-wait disabled:opacity-55;
+  }
+
   .device-table-row > span:nth-child(1),
   .device-table-row > span:nth-child(2),
   .device-table-row > span:nth-child(3),
@@ -1013,6 +1021,12 @@ button {
 
   body.oled-dark .device-room-title {
     color: #c7d0d6;
+  }
+
+  body.oled-dark .device-room-scene select {
+    border-color: #26313a;
+    background: #080b0d;
+    color: #e7ecef;
   }
 
   body.oled-dark .device-room-rule {
