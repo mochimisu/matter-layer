@@ -59,6 +59,7 @@ function blindIntents(covers: CoverGroup) {
 function createBlindIntents(covers: CoverGroup) {
   covers.state.motion ??= state.optimistic<BlindMotion>("idle", { ttl: "90s" });
   const lastPositions = new Map<string, number>();
+  const commandedMotion = new Map<string, BlindMotion>();
   let selfCommandUntil = 0;
   let lastRemoteMotionAt = 0;
 
@@ -127,24 +128,22 @@ function createBlindIntents(covers: CoverGroup) {
       if (Math.abs(delta) < directRemoteMinDelta) {
         return;
       }
-      if (delta < 0 && covers.state.motion.value !== "up") {
+      if (delta < 0 && (commandedMotion.get(cover.key) ?? covers.state.motion.value) !== "up") {
         open();
       }
-      if (delta > 0 && covers.state.motion.value !== "down") {
+      if (delta > 0 && (commandedMotion.get(cover.key) ?? covers.state.motion.value) !== "down") {
         close();
       }
     });
     cover.onActiveLayerChange((active) => {
-      const isAutomationCommand = active?.layer === "automation";
-      const isWebCommand = active?.layer === "override" && active.writer === "web";
-      const isSceneCommand = active?.layer === "scene";
-      if (!isAutomationCommand && !isWebCommand && !isSceneCommand) {
-        return;
-      }
-      const motion = motionFromState(active.state);
+      // Scene removal can reveal the default open state. Track each member
+      // independently: a group may have different scene destinations.
+      const motion = motionFromState(active?.state);
       if (!motion) {
+        commandedMotion.delete(cover.key);
         return;
       }
+      commandedMotion.set(cover.key, motion);
       covers.state.motion.set(motion);
       markSelfCommand();
     });

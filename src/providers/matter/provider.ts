@@ -17,6 +17,7 @@ export class MatterProvider implements ProviderAdapter {
   readonly name = "matter" as const;
   private runtime?: Runtime & {
     enqueueApply?: (target: string) => void;
+    forceApplyNext?: (target: string) => void;
     notifyProviderChanged?: (provider: "matter") => void;
     logMatter?: (entry: MatterRuntimeLogEntry) => void;
   };
@@ -25,6 +26,7 @@ export class MatterProvider implements ProviderAdapter {
   private targets = new Map<string, { target: string; capabilities: Record<string, any> }>();
   private ws?: WebSocket;
   private connected = false;
+  private receivedInitialNodes = false;
   private listenRefreshTimer?: NodeJS.Timeout;
   private nodeCount = 0;
   private lastMessageAt?: number;
@@ -81,6 +83,7 @@ export class MatterProvider implements ProviderAdapter {
       sources?: Map<string, { binding: SourceBinding; updated: () => number | undefined }>;
       targets?: Map<string, any>;
       enqueueApply?: (target: string) => void;
+      forceApplyNext?: (target: string) => void;
       notifyProviderChanged?: (provider: "matter") => void;
     },
   ) {
@@ -418,6 +421,10 @@ export class MatterProvider implements ProviderAdapter {
       }
       if (message.message_id === "matter-layer-start" && Array.isArray(message.result)) {
         this.ingestNodes(message.result, { markSourcesUpdated: false });
+        if (this.receivedInitialNodes) {
+          for (const nodeId of new Set(this.nodeByKey.values())) this.reapplyNode(nodeId);
+        }
+        this.receivedInitialNodes = true;
         void this.syncStartupSourceAttributes().finally(settleStartup);
       }
       if (message.event === "node_updated" && message.data) {
@@ -545,6 +552,7 @@ export class MatterProvider implements ProviderAdapter {
       const product = stringValue(attrs["0/40/3"] ?? node.productName ?? node.product_name ?? node.product);
       const deviceType = deviceTypeFromNode(node, attrs);
       const hasAvailable = "available" in node;
+      const wasUnavailable = this.availableByNode.get(nodeId) === false;
       const available = Boolean(node.available);
       if (Number.isFinite(nodeId)) {
         this.allNodeIds.add(nodeId);
@@ -612,6 +620,7 @@ export class MatterProvider implements ProviderAdapter {
           }
         }
       }
+      if (hasAvailable && available && wasUnavailable) this.reapplyNode(nodeId);
     }
     if (changed) {
       this.runtime?.notifyProviderChanged?.(this.name);
@@ -1086,6 +1095,15 @@ export class MatterProvider implements ProviderAdapter {
       this.offlineSinceByNode.set(nodeId, Date.now());
     }
     this.runtime?.notifyProviderChanged?.(this.name);
+    if (available && wasAvailable === false) this.reapplyNode(nodeId);
+  }
+
+  private reapplyNode(nodeId: number) {
+    for (const target of this.targets.keys()) {
+      if ((this.nodeByKey.get(target) ?? this.nodeByKey.get(parentTarget(target))) !== nodeId) continue;
+      this.runtime?.forceApplyNext?.(target);
+      this.runtime?.enqueueApply?.(target);
+    }
   }
 
   private markNodeHeard(nodeId: number, options: { event?: boolean } = {}) {

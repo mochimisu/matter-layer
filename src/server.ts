@@ -132,8 +132,7 @@ async function main() {
   });
 
   app.delete("/api/devices/:target/web-override", (req, res) => {
-    runtime.clearLayer(req.params.target, "webOverride");
-    runtime.clearLayer(req.params.target, "override");
+    runtime.restoreAutomatic(req.params.target);
     res.json(runtime.snapshot());
   });
 
@@ -380,7 +379,7 @@ async function main() {
     app.use(
       express.static(webDistDir, {
         setHeaders(res, path) {
-          if (path.endsWith("index.html")) {
+          if (path.endsWith("index.html") || path.endsWith("sw.js") || path.endsWith("manifest.webmanifest")) {
             res.setHeader("Cache-Control", "no-store");
           }
         },

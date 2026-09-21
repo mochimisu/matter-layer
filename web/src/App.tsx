@@ -2,6 +2,9 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  ChevronRight,
+  Layers,
+  Sparkles,
   DoorClosed,
   DoorOpen,
   Lightbulb,
@@ -15,6 +18,7 @@ import { epaperDisplays, type EpaperDisplayDefinition } from "../../src/displays
 import { buildFlowLanes, layoutFlowLanes, type FlowNodeModel } from "./flowGraph";
 import { applySnapshotDelta, type LiveMessage, type Snapshot } from "./snapshotDeltas";
 import "./style.css";
+import { InstallButton } from "./pwa";
 
 type AppTab = "devices" | "details" | "matter-devices" | "graph" | "log" | "epaper";
 type DeviceOpResult = { label: string; tone: "ok" | "bad"; title?: string };
@@ -79,6 +83,7 @@ function themeFromStorage() {
 
 function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [deviceOpResults, setDeviceOpResults] = useState<Record<string, DeviceOpResult>>({});
   const [tab, setTab] = useState<AppTab>(() => tabFromLocation());
@@ -102,13 +107,19 @@ function App() {
     let ws: WebSocket | null = null;
     let reconnectTimer: number | undefined;
     async function loadIfActive() {
-      const response = await fetch("/api/snapshot");
-      const next = await response.json();
-      if (active) setSnapshot(next);
+      try {
+        const response = await fetch("/api/snapshot", { cache: "no-store" });
+        if (!response.ok) throw new Error("Snapshot unavailable");
+        const next = await response.json();
+        if (active) setSnapshot(next);
+      } catch {
+        if (active) setConnected(false);
+      }
     }
     function connect() {
       if (!active || !pageVisible) return;
       ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/events`);
+      ws.onopen = () => { if (active) setConnected(true); };
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data) as LiveMessage;
@@ -133,6 +144,7 @@ function App() {
       };
       ws.onclose = () => {
         ws = null;
+        if (active) setConnected(false);
         if (!active || !pageVisible) return;
         void loadIfActive();
         reconnectTimer = window.setTimeout(connect, 1000);
@@ -412,6 +424,7 @@ function App() {
               <div className="header-subtitle">Matter Control Plane</div>
             </div>
             <div className="header-summary">
+              <InstallButton />
               <button
                 type="button"
                 className="theme-toggle"
@@ -480,6 +493,7 @@ function App() {
         </div>
       </header>
 
+      {!connected ? <div className="connection-notice" role="status">Connecting to Matter Layer… {snapshot ? "Displayed state may be out of date." : "Check your Wi-Fi or remote connection if this continues."}</div> : null}
       <div className={["mx-auto grid max-w-[1560px] grid-cols-1 gap-3 px-4 py-3", tab === "details" ? "lg:grid-cols-[320px_1fr]" : ""].join(" ")}>
         {tab === "details" ? (
         <aside className="grid content-start gap-3">
@@ -558,7 +572,7 @@ function App() {
                         Off
                       </button>
                       <button className="gaia-button" disabled={busy === target.target} onClick={() => void clearOverride(target.target)}>
-                        Clear
+                        Restore automatic
                       </button>
                     </div>
                     {layer?.layers.length ? (
@@ -1098,6 +1112,24 @@ function DevicesOverview({
   onSelectDevice: (target: string | null) => void;
   deviceOpResults: Record<string, DeviceOpResult>;
 }) {
+  const [expandedRooms, setExpandedRooms] = useState<Record<string, boolean>>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("matter-layer.expanded-rooms") ?? "{}");
+      return stored && typeof stored === "object" && !Array.isArray(stored)
+        ? Object.fromEntries(Object.entries(stored).filter(([, value]) => typeof value === "boolean")) : {};
+    }
+    catch { return {}; }
+  });
+  function setRoomsExpanded(rooms: string[], open: boolean) {
+    setExpandedRooms((current) => {
+      const next = { ...current, ...Object.fromEntries(rooms.map((room) => [room, open])) };
+      try { localStorage.setItem("matter-layer.expanded-rooms", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  function roomIsExpanded(room: string) {
+    return expandedRooms[room] ?? !window.matchMedia("(max-width: 767px)").matches;
+  }
   const layersByTarget = new Map((snapshot?.layers ?? []).map((layer) => [layer.target, layer]));
   const sourceById = new Map((snapshot?.sources ?? []).map((source) => [source.source, source]));
   const resolvedByKey = new Map((matter?.status?.resolved ?? []).map((binding) => [binding.key, binding]));
@@ -1116,44 +1148,54 @@ function DevicesOverview({
   }
   return (
     <section className="gaia-panel device-room">
-      <div className="device-table">
-        <div className="device-table-header">
-          <span>Status</span>
-          <span>Device</span>
-          <span>Layer</span>
-          <span>Reason</span>
-          <span>Metrics</span>
-          <span>Updated</span>
-          <span>Probe</span>
-          <span>RSSI</span>
-          <span>Actions</span>
-          <span>Ops</span>
-        </div>
-        {rooms.map(([room, targets]) => (
-          <Fragment key={room}>
-            {(() => {
-              const availability = roomAvailability(targets, resolvedByKey);
-              const scene = snapshot?.scenes?.find((item) => item.room === room);
-              return (
-            <div className="device-room-head">
-              <h2 className="device-room-title">{humanRoomName(room)}</h2>
-              <div className="device-room-rule" aria-hidden="true" />
-              {scene ? (
-                <label className="device-room-scene">
-                  <span>Scene</span>
-                  <select
-                    value={scene.selected}
-                    disabled={busy === `scene:${room}`}
-                    onChange={(event) => void onSetScene(room, event.target.value)}
-                  >
-                    {scene.options.map((option) => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                </label>
-              ) : null}
-              <span className="device-room-count">{availability.available}/{availability.total}</span>
+      <div className="device-room-toolbar">
+        <span className="device-room-summary">{rooms.length} rooms <span aria-hidden="true">·</span> {rooms.reduce((total, [, targets]) => total + targets.length, 0)} devices</span>
+        <button className="gaia-button" disabled={!rooms.length} onClick={() => setRoomsExpanded(rooms.map(([room]) => room), !rooms.every(([room]) => roomIsExpanded(room)))}>
+          {rooms.length && rooms.every(([room]) => roomIsExpanded(room)) ? "Collapse all" : "Expand all"}
+        </button>
+      </div>
+      <div className="device-room-list">
+        {rooms.map(([room, targets]) => {
+          const availability = roomAvailability(targets, resolvedByKey);
+          const scene = snapshot?.scenes?.find((item) => item.room === room);
+          const roomSources = (snapshot?.sources ?? []).filter((source) => source.key.startsWith(`${room}.`));
+          const presenceSignal = snapshot?.signals.find((signal) => signal.id === `${room}.presence` && signal.initialized);
+          const presenceSources = roomSources.filter((source) => source.property === "presence");
+          const presence = typeof presenceSignal?.value === "boolean" ? presenceSignal.value
+            : presenceSources.some((source) => source.value === true) ? true
+            : presenceSources.length && presenceSources.every((source) => source.value === false) ? false : undefined;
+          const hasOverrides = roomSources.some((source) => !!source.override) || targets.some((target) =>
+            layersByTarget.get(target.target)?.layers.some((layer) => layer.layer === "override" || layer.layer === "webOverride"));
+          const expanded = roomIsExpanded(room);
+          return (
+          <div className="device-room-section" data-expanded={expanded} key={room}>
+            <div className="device-room-header" data-has-scene={!!scene}>
+            <h2 className="device-room-heading">
+              <button className="device-room-head" aria-expanded={expanded} aria-controls={`room-${room}`} onClick={() => setRoomsExpanded([room], !expanded)}>
+                <span className="device-room-label">
+                  <span className="device-room-title">{humanRoomName(room)}</span>
+                  <ChevronRight className="room-chevron" size={18} aria-hidden="true" />
+                </span>
+                <span className="device-room-indicators">
+                  <span className={`room-indicator ${presence === true ? "room-indicator-active" : ""}`} title={presence === undefined ? "Presence unknown" : presence ? "Presence detected" : "No presence"} aria-label={presence === undefined ? "Presence unknown" : presence ? "Presence detected" : "No presence"}>
+                    <PresenceStatusIcon active={presence === true} />{presence === undefined ? <span>?</span> : null}
+                  </span>
+                  <span className={`room-indicator ${hasOverrides ? "room-indicator-override" : ""}`} title={hasOverrides ? "Overrides active" : "No overrides"} aria-label={hasOverrides ? "Overrides active" : "No overrides"}><Layers size={19} aria-hidden="true" /></span>
+                </span>
+                <span className="device-room-count" title="Available devices">{availability.available}/{availability.total}</span>
+              </button>
+            </h2>
+              {scene ? <label className="device-room-scene room-scene-control"><Sparkles size={18} aria-hidden="true" />
+                <select aria-label={`${humanRoomName(room)} scene`} value={scene.selected} disabled={busy === `scene:${room}`} onChange={(event) => void onSetScene(room, event.target.value)}>
+                  {scene.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label> : null}
             </div>
-              );
-            })()}
+            <div id={`room-${room}`} hidden={!expanded}>
+              <div className="device-table">
+                <div className="device-table-header">
+                  {["Status", "Device", "Layer", "Reason", "Metrics", "Updated", "Probe", "RSSI", "Actions", "Ops"].map((label) => <span key={label}>{label}</span>)}
+                </div>
             {targets.map((target) => {
               const binding = resolvedByKey.get(target.key) ?? resolvedByKey.get(target.target);
               const layer = layersByTarget.get(target.target);
@@ -1187,8 +1229,8 @@ function DevicesOverview({
                     </button>
                   </span>
                   <span><LayerBadge layer={sourceOverride ? "override" : layer?.surfaced?.layer} /></span>
-                  <span className="min-w-0 truncate text-xs text-gaia-muted" title={(sourceOverride?.reason ?? reason) || undefined}>{sourceOverride?.reason ?? reason}</span>
-                  <span className="min-w-0 truncate text-xs text-gaia-muted">
+                  <span data-empty={!(sourceOverride?.reason ?? reason)} className="min-w-0 truncate text-xs text-gaia-muted" title={(sourceOverride?.reason ?? reason) || undefined}>{sourceOverride?.reason ?? reason}</span>
+                  <span data-empty={![...metrics, battery].some((item) => item.label !== "—")} className="min-w-0 truncate text-xs text-gaia-muted">
                     {[...metrics, battery].filter((item) => item.label !== "—").map((item) => item.label).join(" · ") || "—"}
                   </span>
                   <span className="min-w-0 truncate text-xs font-bold text-gaia-muted" title={updatedAt ? new Date(updatedAt).toLocaleString() : undefined}>
@@ -1232,8 +1274,11 @@ function DevicesOverview({
                 </article>
               );
             })}
-          </Fragment>
-        ))}
+              </div>
+            </div>
+          </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -1634,7 +1679,7 @@ function targetAction(
 
 function clearTargetAction(target: Snapshot["targets"][number], onClearOverride: (target: string) => Promise<void>): DeviceAction {
   return {
-    label: "Clear",
+    label: "Restore automatic",
     busyKey: target.target,
     run: () => onClearOverride(target.target),
   };

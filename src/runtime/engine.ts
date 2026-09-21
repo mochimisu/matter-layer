@@ -182,6 +182,14 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     this.enqueueApply(target);
   }
 
+  restoreAutomatic(target: string) {
+    this.withApplyBatch(() => {
+      this.forceApplyNext(target);
+      this.clearLayer(target, "webOverride");
+      this.clearLayer(target, "override");
+    });
+  }
+
   hasLayer(target: string, layer: LayerName, key?: string) {
     return Boolean(this.layers.layer(target, layer, key));
   }
@@ -372,10 +380,15 @@ export class MatterLayerRuntime implements Runtime, DeviceRuntime {
     }
     this.restoreOverrides();
     this.started = true;
-    this.runAll();
-    for (const target of this.layers.snapshot().filter((layer) => layer.layers.some((item) => item.layer === "override")).map((layer) => layer.target)) {
-      this.enqueueApply(target);
-    }
+    // Cached reports can survive a power outage. Compute the complete rule
+    // stack first, then explicitly restore every target once at startup.
+    this.withApplyBatch(() => {
+      this.runAll();
+      for (const target of this.targets.keys()) {
+        this.forceApplyNext(target);
+        this.enqueueApply(target);
+      }
+    });
   }
 
   stop() {

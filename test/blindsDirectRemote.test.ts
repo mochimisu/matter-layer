@@ -14,6 +14,57 @@ async function tick() {
 }
 
 describe("direct blind remote inference", () => {
+  it("does not infer a manual override when a scene returns to default open", async () => {
+    vi.useFakeTimers();
+    const runtime = buildRuntime();
+    try {
+      await runtime.start();
+      runtime.updateSource({ source: "office.blinds.position", value: 0, provider: "matter", observedAt: Date.now() });
+      runtime.writeLayer("office.blinds", "scene", { state: { position: "closed" }, writer: "blackout" });
+      await vi.advanceTimersByTimeAsync(20_000);
+      runtime.updateSource({ source: "office.blinds.position", value: 100, provider: "matter", observedAt: Date.now() });
+      expect(runtime.layers.layer("office.blinds", "override")).toBeUndefined();
+      runtime.clearLayer("office.blinds", "scene");
+      await vi.advanceTimersByTimeAsync(20_000);
+      runtime.updateSource({ source: "office.blinds.position", value: 0, provider: "matter", observedAt: Date.now() });
+      expect(runtime.layers.layer("office.blinds", "override")).toBeUndefined();
+      // An actual reversal after settling still counts as direct remote input.
+      runtime.updateSource({ source: "office.blinds.position", value: 20, provider: "matter", observedAt: Date.now() });
+      expect(runtime.layers.layer("office.blinds", "override")?.state).toEqual({ position: "closed" });
+    } finally {
+      runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("tracks scene movement separately for each blind in a group", async () => {
+    vi.useFakeTimers();
+    const runtime = new MatterLayerRuntime({ dryRun: true });
+    runtime.loadModules({
+      devices: [defineRoomDevices("office", ({ room }) => {
+        room.blindsRemote = remote("office.blindsRemote");
+        room.blinds = smartwingsGroup(["office.left", "office.right"]);
+      })],
+      rules: [defineRoomRules("office", ({ room }) => bilresaBlinds(room.blindsRemote, room.blinds))],
+    });
+    try {
+      await runtime.start();
+      for (const target of ["office.left", "office.right"]) {
+        runtime.updateSource({ source: `${target}.position`, value: 50, provider: "matter", observedAt: Date.now() });
+      }
+      runtime.writeLayer("office.left", "scene", { state: { position: "closed" } });
+      runtime.writeLayer("office.right", "scene", { state: { position: "open" } });
+      await vi.advanceTimersByTimeAsync(20_000);
+      runtime.updateSource({ source: "office.left.position", value: 100, provider: "matter", observedAt: Date.now() });
+      runtime.updateSource({ source: "office.right.position", value: 0, provider: "matter", observedAt: Date.now() });
+      expect(runtime.layers.layer("office.left", "override")).toBeUndefined();
+      expect(runtime.layers.layer("office.right", "override")).toBeUndefined();
+    } finally {
+      runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("defaults blinds to open", async () => {
     const runtime = new MatterLayerRuntime({ dryRun: true });
     runtime.loadModules({

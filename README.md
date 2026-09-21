@@ -131,3 +131,21 @@ npm run dev
 
 Set `MATTER_LAYER_MATTER_REMOTE_KEEPALIVE_ENABLED=0` to disable periodic
 Matter `ping_node` keepalive probes for remotes marked with `remoteKeepalive`.
+
+## Android app
+
+The production web build includes an installable PWA. Serve it over HTTPS (with
+WebSocket forwarding for `/events`), open it in Android Chrome, and choose
+**Install app** in the page header or Chrome's menu. The in-page button appears
+when Chrome offers installation. Plain HTTP on a LAN address does not qualify;
+localhost is allowed for development checks.
+
+The Devices tab has collapsible room headers showing the selected scene,
+presence, and device or sensor overrides. Rooms start collapsed on phones and
+expanded on desktop; choices are saved on that browser. Expanded rooms use
+cards with touch-sized controls on phones. Scene selection stays usable in the header even when collapsed. Expand all /
+Collapse all applies to the rooms currently shown and remembers those choices.
+
+The service worker caches only an offline notice. It never caches device state,
+queues commands, or makes offline controls appear available. The app needs a
+connection to the Matter Layer server to control devices.

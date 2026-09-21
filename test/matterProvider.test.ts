@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MatterProvider } from "../src/providers/matter/provider";
 
 describe("MatterProvider command translation", () => {
@@ -1036,5 +1036,35 @@ describe("MatterProvider command translation", () => {
         process.env.MATTER_REMOTE_KEEPALIVE_PER_NODE_SEC = previousPerNode;
       }
     }
+  });
+});
+
+
+describe("Matter power recovery", () => {
+  it.each(["snapshot", "probe"])("reapplies all node endpoints on recovery via %s", (route) => {
+    const provider = new MatterProvider({ url: "ws://example.invalid" }) as any;
+    const calls: string[] = [];
+    provider.runtime = {
+      forceApplyNext: (target: string) => calls.push(`force:${target}`),
+      enqueueApply: (target: string) => calls.push(`apply:${target}`),
+      notifyProviderChanged: vi.fn(),
+    };
+    for (const target of ["room.fan", "room.fan.endpoint.6.statusLed", "other.light"]) {
+      provider.targets.set(target, { target });
+      provider.nodeByKey.set(target, target === "other.light" ? 2 : 1);
+    }
+    provider.availableByNode.set(1, true);
+    const update = (available: boolean) => route === "snapshot"
+      ? provider.ingestNodes([{ node_id: 1, available, attributes: {} }])
+      : provider.setNodeAvailability(1, available);
+    update(false);
+    expect(calls).toEqual([]);
+    update(true);
+    expect(calls).toEqual([
+      "force:room.fan", "apply:room.fan",
+      "force:room.fan.endpoint.6.statusLed", "apply:room.fan.endpoint.6.statusLed",
+    ]);
+    update(true);
+    expect(calls).toHaveLength(4);
   });
 });
